@@ -1,7 +1,116 @@
-import { useState, useEffect } from 'react';
+import { ReactNode, UIEvent, useEffect, useMemo, useState } from 'react';
 import { apiFetch } from '../lib/api';
 import { FileCode, Settings, Save, Loader2, ChevronRight } from 'lucide-react';
 import { toast } from 'sonner';
+
+type SyntaxLanguage = 'cfg' | 'lua' | 'json' | 'html' | 'css' | 'js' | 'plain';
+
+const tokenClassNames = {
+  comment: 'text-zinc-500 italic',
+  string: 'text-emerald-300',
+  number: 'text-amber-300',
+  keyword: 'text-sky-300',
+  boolean: 'text-violet-300',
+  property: 'text-orange-300',
+  function: 'text-cyan-300',
+  variable: 'text-rose-300',
+  tag: 'text-red-300',
+  attribute: 'text-yellow-200',
+  selector: 'text-orange-300',
+  punctuation: 'text-zinc-500',
+};
+
+const cfgCommands = [
+  'add_ace',
+  'add_principal',
+  'ensure',
+  'exec',
+  'endpoint_add_tcp',
+  'endpoint_add_udp',
+  'load_server_icon',
+  'onesync',
+  'refresh',
+  'restart',
+  'set',
+  'setr',
+  'sets',
+  'start',
+  'stop',
+  'sv_endpointprivacy',
+  'sv_enforcegamebuild',
+  'sv_hostname',
+  'sv_licensekey',
+  'sv_maxclients',
+  'sv_projectdesc',
+  'sv_projectname',
+  'sv_scriptHookAllowed',
+];
+
+const luaKeywords = [
+  'and',
+  'break',
+  'do',
+  'else',
+  'elseif',
+  'end',
+  'false',
+  'for',
+  'function',
+  'if',
+  'in',
+  'local',
+  'nil',
+  'not',
+  'or',
+  'repeat',
+  'return',
+  'then',
+  'true',
+  'until',
+  'while',
+];
+
+const jsKeywords = [
+  'async',
+  'await',
+  'break',
+  'case',
+  'catch',
+  'class',
+  'const',
+  'continue',
+  'default',
+  'else',
+  'export',
+  'extends',
+  'finally',
+  'for',
+  'from',
+  'function',
+  'if',
+  'import',
+  'let',
+  'new',
+  'return',
+  'switch',
+  'this',
+  'throw',
+  'try',
+  'typeof',
+  'var',
+  'while',
+];
+
+const cssAtRules = [
+  'charset',
+  'container',
+  'font-face',
+  'import',
+  'keyframes',
+  'layer',
+  'media',
+  'supports',
+];
 
 export default function Configuration() {
   const [files, setFiles] = useState<string[]>([]);
@@ -10,6 +119,8 @@ export default function Configuration() {
   const [initialContent, setInitialContent] = useState<string>('');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const language = useMemo(() => getLanguageFromFile(selectedFile), [selectedFile]);
+  const highlightedContent = useMemo(() => highlightCode(content, language), [content, language]);
 
   useEffect(() => {
     const fetchFiles = async () => {
@@ -109,6 +220,9 @@ export default function Configuration() {
                <div className="flex items-center gap-2">
                  <FileCode className="h-3.5 w-3.5 text-zinc-400" />
                  <span className="text-xs font-mono font-medium text-zinc-300">{selectedFile || 'Select a file'}</span>
+                 <span className="rounded border border-zinc-800 bg-zinc-950 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider text-zinc-500">
+                   {language}
+                 </span>
                </div>
                
                <button 
@@ -127,18 +241,189 @@ export default function Configuration() {
                    <Loader2 className="h-6 w-6 animate-spin text-orange-500" />
                  </div>
                ) : (
-                 <textarea 
-                    className="w-full h-full bg-transparent border-none p-4 font-mono text-[13px] leading-relaxed text-zinc-300 focus:outline-none focus:ring-0 resize-none placeholder-zinc-700"
-                    placeholder="File content..."
-                    spellCheck={false}
-                    value={content}
-                    onChange={(e) => setContent(e.target.value)}
-                    disabled={saving}
-                 ></textarea>
+                 <CodeEditor
+                   value={content}
+                   highlightedValue={highlightedContent}
+                   onChange={setContent}
+                   disabled={saving}
+                 />
                )}
             </div>
          </div>
       </div>
     </div>
   );
+}
+
+function CodeEditor({
+  value,
+  highlightedValue,
+  onChange,
+  disabled,
+}: {
+  value: string;
+  highlightedValue: ReactNode[];
+  onChange: (value: string) => void;
+  disabled: boolean;
+}) {
+  const [scroll, setScroll] = useState({ top: 0, left: 0 });
+
+  const handleScroll = (event: UIEvent<HTMLTextAreaElement>) => {
+    setScroll({
+      top: event.currentTarget.scrollTop,
+      left: event.currentTarget.scrollLeft,
+    });
+  };
+
+  return (
+    <div className="absolute inset-0 overflow-hidden bg-[#070707]">
+      <pre
+        aria-hidden="true"
+        className="pointer-events-none absolute inset-0 overflow-hidden p-4 font-mono text-[13px] leading-relaxed text-zinc-300"
+        style={{ transform: `translate(${-scroll.left}px, ${-scroll.top}px)` }}
+      >
+        <code>{highlightedValue.length ? highlightedValue : <span>&nbsp;</span>}</code>
+      </pre>
+      <textarea
+        className="absolute inset-0 h-full w-full resize-none overflow-auto border-none bg-transparent p-4 font-mono text-[13px] leading-relaxed text-transparent caret-orange-300 placeholder-zinc-700 selection:bg-orange-500/25 focus:outline-none focus:ring-0"
+        placeholder="File content..."
+        spellCheck={false}
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        onScroll={handleScroll}
+        disabled={disabled}
+        autoCapitalize="off"
+        autoCorrect="off"
+      />
+    </div>
+  );
+}
+
+function getLanguageFromFile(filename: string | null): SyntaxLanguage {
+  const file = filename?.toLowerCase() || '';
+
+  if (file.endsWith('.cfg') || file.endsWith('.conf')) return 'cfg';
+  if (file.endsWith('.lua') || file.endsWith('fxmanifest.lua') || file.endsWith('__resource.lua')) return 'lua';
+  if (file.endsWith('.json')) return 'json';
+  if (file.endsWith('.html') || file.endsWith('.htm')) return 'html';
+  if (file.endsWith('.css')) return 'css';
+  if (file.endsWith('.js') || file.endsWith('.mjs') || file.endsWith('.cjs') || file.endsWith('.ts')) return 'js';
+
+  return 'plain';
+}
+
+function highlightCode(code: string, language: SyntaxLanguage): ReactNode[] {
+  if (!code) return [];
+
+  switch (language) {
+    case 'cfg':
+      return highlightCfg(code);
+    case 'lua':
+      return highlightRegex(code, [
+        [/--.*$/gm, tokenClassNames.comment],
+        [/"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'/g, tokenClassNames.string],
+        [new RegExp(`\\b(${luaKeywords.join('|')})\\b`, 'g'), tokenClassNames.keyword],
+        [/\b(?:RegisterCommand|RegisterNetEvent|AddEventHandler|TriggerClientEvent|TriggerServerEvent|CreateThread|Citizen\.CreateThread|exports)\b/g, tokenClassNames.function],
+        [/\b\d+(?:\.\d+)?\b/g, tokenClassNames.number],
+      ]);
+    case 'json':
+      return highlightRegex(code, [
+        [/"(?:\\.|[^"\\])*"(?=\s*:)/g, tokenClassNames.property],
+        [/"(?:\\.|[^"\\])*"/g, tokenClassNames.string],
+        [/\b(?:true|false|null)\b/g, tokenClassNames.boolean],
+        [/-?\b\d+(?:\.\d+)?(?:e[+-]?\d+)?\b/gi, tokenClassNames.number],
+        [/[[\]{}:,]/g, tokenClassNames.punctuation],
+      ]);
+    case 'html':
+      return highlightRegex(code, [
+        [/<!--[\s\S]*?-->/g, tokenClassNames.comment],
+        [/<\/?[a-z][\w:-]*/gi, tokenClassNames.tag],
+        [/\s[a-z_:][\w:.-]*(?==)/gi, tokenClassNames.attribute],
+        [/"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'/g, tokenClassNames.string],
+        [/[<>/]/g, tokenClassNames.punctuation],
+      ]);
+    case 'css':
+      return highlightRegex(code, [
+        [/\/\*[\s\S]*?\*\//g, tokenClassNames.comment],
+        [new RegExp(`@(?:${cssAtRules.join('|')})\\b`, 'g'), tokenClassNames.keyword],
+        [/#[\w-]+|\.[\w-]+|[a-z][\w-]*(?=\s*[{,])/gi, tokenClassNames.selector],
+        [/[a-z-]+(?=\s*:)/gi, tokenClassNames.property],
+        [/"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'/g, tokenClassNames.string],
+        [/\b\d+(?:\.\d+)?(?:px|rem|em|vh|vw|%|s|ms)?\b/gi, tokenClassNames.number],
+      ]);
+    case 'js':
+      return highlightRegex(code, [
+        [/\/\*[\s\S]*?\*\/|\/\/.*$/gm, tokenClassNames.comment],
+        [/"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`/g, tokenClassNames.string],
+        [new RegExp(`\\b(${jsKeywords.join('|')})\\b`, 'g'), tokenClassNames.keyword],
+        [/\b(?:true|false|null|undefined)\b/g, tokenClassNames.boolean],
+        [/\b[A-Za-z_$][\w$]*(?=\s*\()/g, tokenClassNames.function],
+        [/\b\d+(?:\.\d+)?\b/g, tokenClassNames.number],
+      ]);
+    default:
+      return [code];
+  }
+}
+
+function highlightCfg(code: string): ReactNode[] {
+  const commandPattern = new RegExp(`^\\s*(${cfgCommands.join('|')})\\b`, 'gim');
+
+  return highlightRegex(code, [
+    [/#.*$|\/\/.*$/gm, tokenClassNames.comment],
+    [/"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'/g, tokenClassNames.string],
+    [commandPattern, tokenClassNames.keyword],
+    [/\b(?:true|false|on|off|yes|no)\b/gi, tokenClassNames.boolean],
+    [/\b(?:resource|group|identifier|steam|license|discord|builtin\.everyone|admin|god)\.[\w:.-]+\b/gi, tokenClassNames.variable],
+    [/\b\d+(?:\.\d+)?\b/g, tokenClassNames.number],
+  ]);
+}
+
+function highlightRegex(
+  code: string,
+  rules: Array<[RegExp, string]>,
+): ReactNode[] {
+  const matches: Array<{ start: number; end: number; className: string }> = [];
+
+  rules.forEach(([pattern, className]) => {
+    const regex = new RegExp(pattern.source, pattern.flags.includes('g') ? pattern.flags : `${pattern.flags}g`);
+    let match: RegExpExecArray | null;
+
+    while ((match = regex.exec(code)) !== null) {
+      const start = match.index;
+      const end = start + match[0].length;
+
+      if (start === end) {
+        regex.lastIndex += 1;
+        continue;
+      }
+
+      if (!matches.some((existing) => start < existing.end && end > existing.start)) {
+        matches.push({ start, end, className });
+      }
+    }
+  });
+
+  matches.sort((a, b) => a.start - b.start);
+
+  const nodes: ReactNode[] = [];
+  let cursor = 0;
+
+  matches.forEach((match, index) => {
+    if (match.start > cursor) {
+      nodes.push(code.slice(cursor, match.start));
+    }
+
+    nodes.push(
+      <span className={match.className} key={`${match.start}-${match.end}-${index}`}>
+        {code.slice(match.start, match.end)}
+      </span>,
+    );
+    cursor = match.end;
+  });
+
+  if (cursor < code.length) {
+    nodes.push(code.slice(cursor));
+  }
+
+  return nodes;
 }
