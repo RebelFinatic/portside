@@ -1,0 +1,6 @@
+{
+  "name": "Portside",
+  "description": "An elegant, comprehensive web panel to manage FiveM servers, including player administration, console access, role management, database tooling, and enhanced analytics.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
