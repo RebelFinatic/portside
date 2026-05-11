@@ -30,6 +30,39 @@ export interface SessionRecord {
   revokedAt: string | null;
 }
 
+export interface MonitorHeartbeatRecord {
+  id: string;
+  timestamp: string;
+  resourceName: string;
+  version: string | null;
+  gameName: string | null;
+  serverName: string | null;
+  players: number | null;
+  maxPlayers: number | null;
+  debug: boolean;
+}
+
+export interface MonitorResourceRecord {
+  name: string;
+  state: string;
+  path: string | null;
+  author: string | null;
+  version: string | null;
+  description: string | null;
+  dependencies: string[];
+  metadata: Record<string, unknown> | null;
+  updatedAt: string;
+}
+
+export interface MonitorPlayerRecord {
+  id: number;
+  name: string;
+  ping: number;
+  identifiers: string[];
+  endpoint: string | null;
+  updatedAt: string;
+}
+
 export class PortsideStore {
   readonly db: Database.Database;
 
@@ -102,6 +135,48 @@ export class PortsideStore {
         ip TEXT,
         success INTEGER NOT NULL,
         reason TEXT
+      );
+
+      CREATE TABLE IF NOT EXISTS monitor_heartbeat (
+        id TEXT PRIMARY KEY CHECK (id = 'current'),
+        timestamp TEXT NOT NULL,
+        resource_name TEXT NOT NULL,
+        version TEXT,
+        game_name TEXT,
+        server_name TEXT,
+        players INTEGER,
+        max_players INTEGER,
+        debug INTEGER NOT NULL DEFAULT 0
+      );
+
+      CREATE TABLE IF NOT EXISTS monitor_resources (
+        name TEXT PRIMARY KEY,
+        state TEXT NOT NULL,
+        path TEXT,
+        author TEXT,
+        version TEXT,
+        description TEXT,
+        dependencies TEXT,
+        metadata TEXT,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS monitor_players (
+        id INTEGER PRIMARY KEY,
+        name TEXT NOT NULL,
+        ping INTEGER NOT NULL DEFAULT 0,
+        identifiers TEXT,
+        endpoint TEXT,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS monitor_events (
+        id TEXT PRIMARY KEY,
+        timestamp TEXT NOT NULL,
+        event_name TEXT NOT NULL,
+        direction TEXT NOT NULL,
+        status TEXT NOT NULL,
+        payload TEXT
       );
     `);
   }
@@ -329,6 +404,217 @@ export class PortsideStore {
     `).all(limit).map((row: any) => ({
       ...row,
       details: row.details ? JSON.parse(row.details) : null,
+    }));
+  }
+
+  upsertMonitorHeartbeat(input: {
+    resourceName: string;
+    version?: string | null;
+    gameName?: string | null;
+    serverName?: string | null;
+    players?: number | null;
+    maxPlayers?: number | null;
+    debug?: boolean;
+  }) {
+    this.db.prepare(`
+      INSERT INTO monitor_heartbeat (id, timestamp, resource_name, version, game_name, server_name, players, max_players, debug)
+      VALUES ('current', ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        timestamp = excluded.timestamp,
+        resource_name = excluded.resource_name,
+        version = excluded.version,
+        game_name = excluded.game_name,
+        server_name = excluded.server_name,
+        players = excluded.players,
+        max_players = excluded.max_players,
+        debug = excluded.debug
+    `).run(
+      now(),
+      input.resourceName,
+      input.version || null,
+      input.gameName || null,
+      input.serverName || null,
+      input.players ?? null,
+      input.maxPlayers ?? null,
+      input.debug ? 1 : 0
+    );
+    return this.getMonitorStatus();
+  }
+
+  getMonitorStatus() {
+    const row = this.db.prepare(`
+      SELECT id, timestamp, resource_name as resourceName, version, game_name as gameName, server_name as serverName,
+        players, max_players as maxPlayers, debug
+      FROM monitor_heartbeat
+      WHERE id = 'current'
+    `).get() as any;
+
+    if (!row) {
+      return {
+        installed: false,
+        online: false,
+        configured: Boolean(process.env.PORTSIDE_MONITOR_TOKEN),
+        lastHeartbeatAt: null,
+        staleAfterSeconds: 30,
+      };
+    }
+
+    const ageMs = Date.now() - new Date(row.timestamp).getTime();
+    return {
+      installed: true,
+      online: ageMs <= 30000,
+      configured: Boolean(process.env.PORTSIDE_MONITOR_TOKEN),
+      lastHeartbeatAt: row.timestamp,
+      staleAfterSeconds: 30,
+      resourceName: row.resourceName,
+      version: row.version,
+      gameName: row.gameName,
+      serverName: row.serverName,
+      players: row.players,
+      maxPlayers: row.maxPlayers,
+      debug: Boolean(row.debug),
+    };
+  }
+
+  upsertMonitorResources(resources: MonitorResourceRecord[]) {
+    const timestamp = now();
+    const sync = this.db.transaction(() => {
+      const seen = new Set<string>();
+      const upsert = this.db.prepare(`
+        INSERT INTO monitor_resources (name, state, path, author, version, description, dependencies, metadata, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(name) DO UPDATE SET
+          state = excluded.state,
+          path = excluded.path,
+          author = excluded.author,
+          version = excluded.version,
+          description = excluded.description,
+          dependencies = excluded.dependencies,
+          metadata = excluded.metadata,
+          updated_at = excluded.updated_at
+      `);
+
+      resources.forEach(resource => {
+        seen.add(resource.name);
+        upsert.run(
+          resource.name,
+          resource.state || 'unknown',
+          resource.path || null,
+          resource.author || null,
+          resource.version || null,
+          resource.description || null,
+          JSON.stringify(resource.dependencies || []),
+          resource.metadata ? JSON.stringify(resource.metadata) : null,
+          timestamp
+        );
+      });
+
+      if (seen.size > 0) {
+        const placeholders = Array.from(seen).map(() => '?').join(',');
+        this.db.prepare(`DELETE FROM monitor_resources WHERE name NOT IN (${placeholders})`).run(...seen);
+      } else {
+        this.db.prepare('DELETE FROM monitor_resources').run();
+      }
+    });
+
+    sync();
+    return this.listMonitorResources();
+  }
+
+  listMonitorResources(): MonitorResourceRecord[] {
+    const rows = this.db.prepare(`
+      SELECT name, state, path, author, version, description, dependencies, metadata, updated_at as updatedAt
+      FROM monitor_resources
+      ORDER BY name ASC
+    `).all() as any[];
+
+    return rows.map(row => ({
+      ...row,
+      dependencies: row.dependencies ? JSON.parse(row.dependencies) : [],
+      metadata: row.metadata ? JSON.parse(row.metadata) : null,
+    }));
+  }
+
+  upsertMonitorPlayers(players: MonitorPlayerRecord[]) {
+    const timestamp = now();
+    const sync = this.db.transaction(() => {
+      const seen = new Set<number>();
+      const upsert = this.db.prepare(`
+        INSERT INTO monitor_players (id, name, ping, identifiers, endpoint, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          name = excluded.name,
+          ping = excluded.ping,
+          identifiers = excluded.identifiers,
+          endpoint = excluded.endpoint,
+          updated_at = excluded.updated_at
+      `);
+
+      players.forEach(player => {
+        seen.add(player.id);
+        upsert.run(
+          player.id,
+          player.name,
+          player.ping || 0,
+          JSON.stringify(player.identifiers || []),
+          player.endpoint || null,
+          timestamp
+        );
+      });
+
+      if (seen.size > 0) {
+        const placeholders = Array.from(seen).map(() => '?').join(',');
+        this.db.prepare(`DELETE FROM monitor_players WHERE id NOT IN (${placeholders})`).run(...seen);
+      } else {
+        this.db.prepare('DELETE FROM monitor_players').run();
+      }
+    });
+
+    sync();
+    return this.listMonitorPlayers();
+  }
+
+  listMonitorPlayers(): MonitorPlayerRecord[] {
+    const rows = this.db.prepare(`
+      SELECT id, name, ping, identifiers, endpoint, updated_at as updatedAt
+      FROM monitor_players
+      ORDER BY id ASC
+    `).all() as any[];
+
+    return rows.map(row => ({
+      ...row,
+      identifiers: row.identifiers ? JSON.parse(row.identifiers) : [],
+    }));
+  }
+
+  logMonitorEvent(input: {
+    eventName: string;
+    direction: 'inbound' | 'outbound';
+    status: string;
+    payload?: unknown;
+  }) {
+    this.db.prepare(`
+      INSERT INTO monitor_events (id, timestamp, event_name, direction, status, payload)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(
+      crypto.randomUUID(),
+      now(),
+      input.eventName,
+      input.direction,
+      input.status,
+      input.payload === undefined ? null : JSON.stringify(input.payload)
+    );
+  }
+
+  recentMonitorEvents(limit = 100) {
+    return this.db.prepare(`
+      SELECT id, timestamp, event_name as eventName, direction, status, payload
+      FROM monitor_events
+      ORDER BY timestamp DESC
+      LIMIT ?
+    `).all(limit).map((row: any) => ({
+      ...row,
+      payload: row.payload ? JSON.parse(row.payload) : null,
     }));
   }
 }

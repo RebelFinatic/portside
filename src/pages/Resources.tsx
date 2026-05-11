@@ -16,17 +16,29 @@ import {
 } from 'lucide-react';
 import {toast} from 'sonner';
 import {apiFetch} from '../lib/api';
+import {useAuthStore} from '../store/useAuthStore';
 
 type ResourceAction = 'start' | 'stop' | 'restart';
 
 interface Resource {
   name: string;
   state: string;
+  path?: string;
   version?: string;
   author?: string;
   description?: string;
   dependencies?: string[];
   logs?: string;
+  source?: string;
+  updatedAt?: string;
+}
+
+interface MonitorStatus {
+  configured: boolean;
+  installed: boolean;
+  online: boolean;
+  lastHeartbeatAt?: string | null;
+  resourceName?: string;
 }
 
 interface PendingAction {
@@ -60,10 +72,41 @@ export default function Resources() {
   const [selectedName, setSelectedName] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [pendingAction, setPendingAction] = useState<PendingAction | null>(null);
+  const [monitorStatus, setMonitorStatus] = useState<MonitorStatus | null>(null);
+  const token = useAuthStore(state => state.token);
 
   useEffect(() => {
     fetchResources();
   }, []);
+
+  useEffect(() => {
+    apiFetch('/monitor/status')
+      .then(setMonitorStatus)
+      .catch(() => setMonitorStatus(null));
+  }, []);
+
+  useEffect(() => {
+    if (!token) return;
+
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const socket = new WebSocket(`${protocol}//${window.location.host}/api/realtime?rooms=resources&token=${encodeURIComponent(token)}`);
+    socket.addEventListener('message', event => {
+      try {
+        const message = JSON.parse(event.data);
+        if (message.room === 'resources' && Array.isArray(message.payload)) {
+          setResources(message.payload.map((resource: Resource) => ({
+            ...resource,
+            logs: resource.logs || `${resource.name}: reported by portside_monitor`,
+            source: resource.source || 'monitor',
+          })));
+        }
+      } catch {
+        // Ignore malformed realtime frames.
+      }
+    });
+
+    return () => socket.close();
+  }, [token]);
 
   const fetchResources = async () => {
     setRefreshing(true);
@@ -71,6 +114,9 @@ export default function Resources() {
       const data = await apiFetch('/resources');
       setResources(data);
       setSelectedName(current => current ?? data[0]?.name ?? null);
+      apiFetch('/monitor/status')
+        .then(setMonitorStatus)
+        .catch(() => setMonitorStatus(null));
     } catch {
       toast.error('Failed to load resources');
     } finally {
@@ -162,6 +208,27 @@ export default function Resources() {
             </button>
           </div>
         </div>
+      </div>
+
+      <div className="mb-6 flex flex-col gap-3 rounded-lg border border-zinc-800 bg-zinc-950/60 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <div className="text-xs font-bold uppercase tracking-widest text-zinc-500">Portside Monitor</div>
+          <p className="mt-1 text-sm text-zinc-300">
+            {monitorStatus?.online
+              ? `Connected via ${monitorStatus.resourceName || 'portside_monitor'}`
+              : monitorStatus?.configured
+                ? 'Waiting for the FiveM monitor resource to check in.'
+                : 'Optional bridge token is not configured; using JSON/RCON fallback data.'}
+          </p>
+        </div>
+        <span className={`inline-flex w-fit items-center gap-2 rounded border px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider ${
+          monitorStatus?.online
+            ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-400'
+            : 'border-zinc-700 bg-zinc-900 text-zinc-400'
+        }`}>
+          <span className={`h-1.5 w-1.5 rounded-full ${monitorStatus?.online ? 'bg-emerald-400' : 'bg-zinc-500'}`} />
+          {monitorStatus?.online ? 'Live Bridge' : 'Fallback Mode'}
+        </span>
       </div>
 
       <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_360px] gap-6 min-h-0">
@@ -409,6 +476,8 @@ function ResourceDrawer({resource}: {resource: Resource | null}) {
           <div className="grid grid-cols-2 gap-3">
             <DetailMetric label="Author" value={resource.author || 'unassigned'} />
             <DetailMetric label="Version" value={resource.version || 'unknown'} />
+            <DetailMetric label="Source" value={resource.source || 'fallback'} />
+            <DetailMetric label="Path" value={resource.path || 'unknown'} />
           </div>
         </DetailSection>
 

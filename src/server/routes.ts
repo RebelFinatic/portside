@@ -12,6 +12,8 @@ import {
   readServerConfig,
   writeServerConfig,
 } from './fivem';
+import { MONITOR_VERSION, createMonitorEventRelay, requireMonitorToken, safeEventName } from './monitor';
+import type { RealtimeHub } from './realtime';
 import {
   createAuthMiddleware,
   createOwner,
@@ -36,9 +38,10 @@ const actionActor = (req: AuthedRequest) => ({
   ip: req.ip,
 });
 
-export const registerApiRoutes = (app: Express, store: PortsideStore, logger: MemoryLogger) => {
+export const registerApiRoutes = (app: Express, store: PortsideStore, logger: MemoryLogger, realtime: RealtimeHub) => {
   const authenticateToken = createAuthMiddleware(store);
   const runRconCommand = createRconRunner(logger);
+  const relayMonitorEvent = createMonitorEventRelay(store, logger, runRconCommand);
 
   let dbPool: mysql.Pool | null = null;
   try {
@@ -59,6 +62,75 @@ export const registerApiRoutes = (app: Express, store: PortsideStore, logger: Me
   } catch (error: any) {
     logger.add('ERROR', `Database connection failed: ${error.message}`, 'database');
   }
+
+  app.post('/api/monitor/heartbeat', requireMonitorToken, (req, res) => {
+    const status = store.upsertMonitorHeartbeat({
+      resourceName: typeof req.body?.resourceName === 'string' ? req.body.resourceName : 'portside_monitor',
+      version: typeof req.body?.version === 'string' ? req.body.version : MONITOR_VERSION,
+      gameName: typeof req.body?.gameName === 'string' ? req.body.gameName : null,
+      serverName: typeof req.body?.serverName === 'string' ? req.body.serverName : null,
+      players: Number.isFinite(req.body?.players) ? Number(req.body.players) : null,
+      maxPlayers: Number.isFinite(req.body?.maxPlayers) ? Number(req.body.maxPlayers) : null,
+      debug: Boolean(req.body?.debug),
+    });
+    realtime.broadcast('status', { monitor: status });
+    res.json({ ok: true, status });
+  });
+
+  app.post('/api/monitor/resources', requireMonitorToken, (req, res) => {
+    const resources = Array.isArray(req.body?.resources) ? req.body.resources : [];
+    const normalized = resources
+      .filter((resource: any) => typeof resource?.name === 'string' && resource.name.trim())
+      .map((resource: any) => ({
+        name: resource.name.trim(),
+        state: typeof resource.state === 'string' ? resource.state : 'unknown',
+        path: typeof resource.path === 'string' ? resource.path : null,
+        author: typeof resource.author === 'string' ? resource.author : null,
+        version: typeof resource.version === 'string' ? resource.version : null,
+        description: typeof resource.description === 'string' ? resource.description : null,
+        dependencies: Array.isArray(resource.dependencies) ? resource.dependencies.filter((dep: unknown) => typeof dep === 'string') : [],
+        metadata: typeof resource.metadata === 'object' && resource.metadata ? resource.metadata : null,
+        updatedAt: new Date().toISOString(),
+      }));
+
+    const stored = store.upsertMonitorResources(normalized);
+    store.logMonitorEvent({ eventName: 'resources.report', direction: 'inbound', status: 'success', payload: { count: stored.length } });
+    realtime.broadcast('resources', stored);
+    res.json({ ok: true, resources: stored.length });
+  });
+
+  app.post('/api/monitor/players', requireMonitorToken, (req, res) => {
+    const players = Array.isArray(req.body?.players) ? req.body.players : [];
+    const normalized = players
+      .filter((player: any) => Number.isFinite(Number(player?.id)) && typeof player?.name === 'string')
+      .map((player: any) => ({
+        id: Number(player.id),
+        name: player.name,
+        ping: Number(player.ping || 0),
+        identifiers: Array.isArray(player.identifiers) ? player.identifiers.filter((identifier: unknown) => typeof identifier === 'string') : [],
+        endpoint: typeof player.endpoint === 'string' ? player.endpoint : null,
+        updatedAt: new Date().toISOString(),
+      }));
+
+    const stored = store.upsertMonitorPlayers(normalized);
+    store.logMonitorEvent({ eventName: 'players.report', direction: 'inbound', status: 'success', payload: { count: stored.length } });
+    realtime.broadcast('players', stored);
+    res.json({ ok: true, players: stored.length });
+  });
+
+  app.post('/api/monitor/events', requireMonitorToken, (req, res) => {
+    const eventName = typeof req.body?.eventName === 'string' ? req.body.eventName : '';
+    if (!safeEventName(eventName)) return res.status(400).json({ error: 'Invalid event name' });
+
+    store.logMonitorEvent({
+      eventName,
+      direction: 'inbound',
+      status: 'success',
+      payload: req.body?.payload ?? null,
+    });
+    realtime.broadcast('logs', { type: 'monitor-event', eventName, payload: req.body?.payload ?? null });
+    res.json({ ok: true });
+  });
 
   app.get('/api/setup/status', (_req, res) => {
     res.json({ setupRequired: !store.hasOwner() });
@@ -90,11 +162,19 @@ export const registerApiRoutes = (app: Express, store: PortsideStore, logger: Me
 
   app.get('/api/server/status', authenticateToken, async (_req, res) => {
     try {
+      const monitorStatus = store.getMonitorStatus();
       let players = 0;
       let maxPlayers = 64;
-      let online = false;
+      let online = monitorStatus.online;
 
-      if (process.env.FIVEM_SERVER_URL) {
+      if (monitorStatus.online) {
+        players = monitorStatus.players ?? store.listMonitorPlayers().length;
+        maxPlayers = monitorStatus.maxPlayers || maxPlayers;
+      }
+
+      if (monitorStatus.online) {
+        online = true;
+      } else if (process.env.FIVEM_SERVER_URL) {
         try {
           const fetchObj = await fetch(`${process.env.FIVEM_SERVER_URL}/info.json`);
           if (fetchObj.ok) {
@@ -122,6 +202,7 @@ export const registerApiRoutes = (app: Express, store: PortsideStore, logger: Me
         cpuUsage: Math.floor(Math.random() * 40) + 10,
         memoryUsage: Math.floor(Math.random() * 60) + 30,
         uptime: '14h 22m',
+        monitor: monitorStatus,
       });
     } catch (err: any) {
       logger.add('ERROR', `Could not fetch server status: ${err.message}`, 'system');
@@ -131,6 +212,19 @@ export const registerApiRoutes = (app: Express, store: PortsideStore, logger: Me
 
   app.get('/api/players', authenticateToken, async (_req, res) => {
     try {
+      const monitorStatus = store.getMonitorStatus();
+      const monitorPlayers = store.listMonitorPlayers();
+      if (monitorStatus.online && monitorPlayers.length > 0) {
+        return res.json(monitorPlayers.map(player => ({
+          id: player.id,
+          name: player.name,
+          ping: player.ping || 0,
+          identifiers: player.identifiers || [],
+          role: 'player',
+          source: 'monitor',
+        })));
+      }
+
       if (!process.env.FIVEM_SERVER_URL) {
         return res.json([
           { id: 1, name: 'thevindu', ping: 42, identifiers: ['steam:11000010abc1234'], role: 'owner' },
@@ -164,6 +258,12 @@ export const registerApiRoutes = (app: Express, store: PortsideStore, logger: Me
 
       await runRconCommand(`clientkick ${id} ${reason}`);
       store.logAction({ ...actionActor(req), action: 'players.kick', method: req.method, route: req.originalUrl, permission: 'players.kick', status: 'success', details: { id, reason } });
+      relayMonitorEvent('playerKicked', {
+        target: Number(id),
+        author: req.user?.username || 'Portside',
+        reason,
+        dropMessage: reason,
+      });
       res.json({ success: true, message: `Player ${id} kicked successfully` });
     } catch (err: any) {
       res.status(502).json({ error: err.message || 'Failed to kick player' });
@@ -202,6 +302,25 @@ export const registerApiRoutes = (app: Express, store: PortsideStore, logger: Me
     res.json(store.recentActionLogs());
   });
 
+  app.get('/api/monitor/status', authenticateToken, (_req, res) => {
+    res.json({
+      ...store.getMonitorStatus(),
+      recentEvents: store.recentMonitorEvents(20),
+    });
+  });
+
+  app.post('/api/announcement', authenticateToken, requirePermission(store, 'announcement'), async (req: AuthedRequest, res) => {
+    const message = typeof req.body?.message === 'string' ? req.body.message.trim() : '';
+    if (!message) return res.status(400).json({ error: 'Announcement message is required' });
+
+    const relayed = await relayMonitorEvent('announcement', {
+      author: req.user?.username || 'Portside',
+      message,
+    });
+    store.logAction({ ...actionActor(req), action: 'announcement.send', method: req.method, route: req.originalUrl, permission: 'announcement', status: relayed ? 'success' : 'failed', details: { message } });
+    res.json({ success: relayed });
+  });
+
   app.post('/api/console/command', authenticateToken, requirePermission(store, 'console.write'), async (req: AuthedRequest, res) => {
     try {
       const { command } = req.body;
@@ -209,6 +328,11 @@ export const registerApiRoutes = (app: Express, store: PortsideStore, logger: Me
 
       const output = await runRconCommand(command.trim());
       store.logAction({ ...actionActor(req), action: 'console.command', method: req.method, route: req.originalUrl, permission: 'console.write', status: 'success', details: { command: command.trim() } });
+      relayMonitorEvent('consoleCommand', {
+        author: req.user?.username || 'Portside',
+        command: command.trim(),
+      });
+      realtime.broadcast('logs', logger.recent(20));
       res.json({ success: true, output });
     } catch (err: any) {
       logger.add('ERROR', `RCON command failed: ${err.message}`, 'rcon');
@@ -270,6 +394,24 @@ export const registerApiRoutes = (app: Express, store: PortsideStore, logger: Me
 
   app.get('/api/resources', authenticateToken, requirePermission(store, 'commands.resources'), async (_req, res) => {
     try {
+      const monitorStatus = store.getMonitorStatus();
+      const monitorResources = store.listMonitorResources();
+      if (monitorStatus.online && monitorResources.length > 0) {
+        return res.json(monitorResources.map(resource => ({
+          name: resource.name,
+          state: resource.state,
+          path: resource.path,
+          version: resource.version || undefined,
+          author: resource.author || undefined,
+          description: resource.description || 'Live resource reported by portside_monitor.',
+          dependencies: resource.dependencies,
+          metadata: resource.metadata,
+          logs: `${resource.name}: reported by portside_monitor`,
+          source: 'monitor',
+          updatedAt: resource.updatedAt,
+        })));
+      }
+
       if (!process.env.FIVEM_SERVER_URL) return res.json(mockResources);
 
       const info = await fetchFiveMJson('/info.json');
@@ -295,6 +437,8 @@ export const registerApiRoutes = (app: Express, store: PortsideStore, logger: Me
       assertSafeResourceName(name);
       await runRconCommand(`${action} ${name}`);
       store.logAction({ ...actionActor(req), action: `resources.${action}`, method: req.method, route: req.originalUrl, permission: 'commands.resources', status: 'success', details: { name } });
+      const latestMonitorResources = store.listMonitorResources();
+      if (latestMonitorResources.length > 0) realtime.broadcast('resources', latestMonitorResources);
       res.json({ success: true, resource: { name, state: action === 'stop' ? 'stopped' : 'started' } });
     } catch (err: any) {
       res.status(502).json({ error: err.message || `Failed to ${action} resource` });
@@ -330,6 +474,11 @@ export const registerApiRoutes = (app: Express, store: PortsideStore, logger: Me
       const configPath = await writeServerConfig(content);
       logger.add('INFO', 'Configuration updated: server.cfg', 'system');
       store.logAction({ ...actionActor(req), action: 'config.update', method: req.method, route: req.originalUrl, permission: 'server.cfg.editor', status: 'success', details: { file } });
+      relayMonitorEvent('configChanged', {
+        author: req.user?.username || 'Portside',
+        file,
+      });
+      realtime.broadcast('logs', logger.recent(20));
       res.json({ success: true, path: configPath });
     } catch (err: any) {
       const status = err.code === 'ENOENT' ? 404 : err.message.includes('not configured') ? 503 : 500;
