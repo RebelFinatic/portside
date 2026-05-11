@@ -8,7 +8,7 @@ Portside is an open-source operations panel for FiveM servers. It gives server o
 - **Player management**: View online players, inspect identifiers, kick, ban, and manage staff workflows.
 - **Live console**: Read server output and execute console/RCON-style commands from the panel.
 - **Resource manager**: Start, stop, restart, search, and inspect FiveM resources.
-- **Configuration editor**: Edit server config files with basic syntax highlighting for `.cfg`, Lua, JSON, HTML, CSS, and JavaScript.
+- **Configuration editor**: Edit the active FiveM `server.cfg` with basic syntax highlighting.
 - **Database tools**: Browse MySQL/MariaDB tables and run quick administrative queries.
 - **Role-based access**: Manage roles and permissions for safer staff access.
 
@@ -27,8 +27,9 @@ Portside is an open-source operations panel for FiveM servers. It gives server o
 3. Configure database settings.
 4. Configure `FIVEM_SERVER_URL`.
 5. Generate a secure `JWT_SECRET`.
-6. To enable live commands, add `set rcon_password "a_strong_password"` in your FiveM `server.cfg`, then set the same value as `FIVEM_RCON_PASSWORD` in `.env`.
-7. Start development with `pnpm dev`.
+6. Set `FIVEM_SERVER_CFG_PATH` to the absolute path of your FiveM `server.cfg`.
+7. To enable live commands, add `set rcon_password "a_strong_password"` in your FiveM `server.cfg`, then set the same value as `FIVEM_RCON_PASSWORD` in `.env`.
+8. Start development with `pnpm dev`.
 
 ## FiveM Integration
 
@@ -42,8 +43,11 @@ RCON is required for commands that change server state, including console comman
 
 ```env
 FIVEM_SERVER_URL="http://127.0.0.1:30120"
+FIVEM_SERVER_CFG_PATH="C:/path/to/txData/default/server.cfg"
 FIVEM_RCON_PASSWORD="your_fivem_rcon_password"
 ```
+
+The settings page reads and writes the file configured by `FIVEM_SERVER_CFG_PATH`. Use an absolute path and make sure the process running Portside has permission to modify that file.
 
 The RCON host and port default to the host and port from `FIVEM_SERVER_URL`. Use `FIVEM_RCON_HOST` and `FIVEM_RCON_PORT` only if your RCON endpoint differs.
 

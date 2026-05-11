@@ -1,6 +1,7 @@
 import express from "express";
 import { createServer as createViteServer } from "vite";
 import path from "path";
+import { readFile, writeFile } from "fs/promises";
 import dgram from "dgram";
 import mysql from "mysql2/promise";
 import jwt from "jsonwebtoken";
@@ -37,6 +38,16 @@ async function startServer() {
     }
 
     return response.json();
+  };
+
+  const configFiles = ['server.cfg'];
+
+  const getServerConfigPath = () => {
+    if (!process.env.FIVEM_SERVER_CFG_PATH) {
+      throw new Error('FIVEM_SERVER_CFG_PATH is not configured');
+    }
+
+    return path.resolve(process.env.FIVEM_SERVER_CFG_PATH);
   };
 
   const getRconConfig = () => {
@@ -440,33 +451,48 @@ async function startServer() {
   });
 
   // --- CONFIG APIs ---
-  const mockConfigs: Record<string, string> = {
-    'server.cfg': 'endpoint_add_tcp "0.0.0.0:30120"\nendpoint_add_udp "0.0.0.0:30120"\n\nsv_maxclients 64\nsv_hostname "Portside Managed Server"\nsets tags "default, deployer, portside"\nsv_licenseKey "portside_license_123"\n\nensure mapmanager\nensure chat\nensure spawnmanager\nensure sessionmanager\nensure hardcap\nensure rconlog\n',
-    'permissions.cfg': 'add_ace group.admin command allow # allow all commands\nadd_ace group.admin command.quit deny # but don\'t allow quit\nadd_principal identifier.steam:11000010abc1234 group.admin\n',
-    'es_extended/config.lua': 'Config = {}\nConfig.Locale = \'en\'\n\nConfig.Accounts = {\n  bank = \'Bank\',\n  black_money = \'Black Money\'\n}\n\nConfig.StartingAccountMoney = {bank = 50000}\n'
-  };
-
-  app.get("/api/config", authenticateToken, (req, res) => {
+  app.get("/api/config", authenticateToken, async (req, res) => {
     const file = req.query.file as string;
     if (!file) {
-      return res.json({ files: Object.keys(mockConfigs) });
+      return res.json({ files: configFiles });
     }
-    if (mockConfigs[file] !== undefined) {
-      res.json({ content: mockConfigs[file] });
-    } else {
-      res.status(404).json({ error: 'Config not found' });
+
+    if (file !== 'server.cfg') {
+      return res.status(404).json({ error: 'Config not found' });
+    }
+
+    try {
+      const configPath = getServerConfigPath();
+      const content = await readFile(configPath, 'utf8');
+      res.json({ content, path: configPath });
+    } catch (err: any) {
+      const status = err.code === 'ENOENT' ? 404 : err.message.includes('not configured') ? 503 : 500;
+      addLog('ERROR', `Could not read server.cfg: ${err.message}`, 'system');
+      res.status(status).json({ error: err.message || 'Failed to read server.cfg' });
     }
   });
 
-  app.put("/api/config", authenticateToken, (req, res) => {
+  app.put("/api/config", authenticateToken, async (req, res) => {
     const file = req.query.file as string;
     const { content } = req.body;
-    if (file && mockConfigs[file] !== undefined && typeof content === 'string') {
-      mockConfigs[file] = content;
-      addLog('INFO', `Configuration updated: ${file}`, 'system');
-      res.json({ success: true });
-    } else {
-      res.status(400).json({ error: 'Invalid config payload' });
+
+    if (file !== 'server.cfg') {
+      return res.status(404).json({ error: 'Config not found' });
+    }
+
+    if (typeof content !== 'string') {
+      return res.status(400).json({ error: 'Invalid config payload' });
+    }
+
+    try {
+      const configPath = getServerConfigPath();
+      await writeFile(configPath, content, 'utf8');
+      addLog('INFO', 'Configuration updated: server.cfg', 'system');
+      res.json({ success: true, path: configPath });
+    } catch (err: any) {
+      const status = err.code === 'ENOENT' ? 404 : err.message.includes('not configured') ? 503 : 500;
+      addLog('ERROR', `Could not write server.cfg: ${err.message}`, 'system');
+      res.status(status).json({ error: err.message || 'Failed to write server.cfg' });
     }
   });
 

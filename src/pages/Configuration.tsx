@@ -1,4 +1,4 @@
-import { ReactNode, UIEvent, useEffect, useMemo, useState } from 'react';
+import { ClipboardEvent, KeyboardEvent, ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { apiFetch } from '../lib/api';
 import { FileCode, Settings, Save, Loader2, ChevronRight } from 'lucide-react';
 import { toast } from 'sonner';
@@ -133,7 +133,7 @@ export default function Configuration() {
           setLoading(false);
         }
       } catch (err) {
-        toast.error('Failed to load configuration files');
+        toast.error(err instanceof Error ? err.message : 'Failed to load configuration files');
         setLoading(false);
       }
     };
@@ -148,7 +148,7 @@ export default function Configuration() {
       setContent(data.content || '');
       setInitialContent(data.content || '');
     } catch (err) {
-      toast.error(`Failed to load ${filename}`);
+      toast.error(err instanceof Error ? err.message : `Failed to load ${filename}`);
     } finally {
       setLoading(false);
     }
@@ -165,7 +165,7 @@ export default function Configuration() {
       setInitialContent(content);
       toast.success(`${selectedFile} saved successfully`);
     } catch (err) {
-      toast.error(`Failed to save ${selectedFile}`);
+      toast.error(err instanceof Error ? err.message : `Failed to save ${selectedFile}`);
     } finally {
       setSaving(false);
     }
@@ -178,7 +178,7 @@ export default function Configuration() {
       <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-6 border-b border-zinc-800/50 mb-6 gap-4">
         <div>
            <h1 className="text-2xl font-bold tracking-tight text-white mb-1">Configuration</h1>
-           <p className="text-sm text-zinc-500">Manage environment, config files, and server properties</p>
+           <p className="text-sm text-zinc-500">Edit the active FiveM server.cfg used by your server</p>
         </div>
       </div>
 
@@ -266,37 +266,237 @@ function CodeEditor({
   onChange: (value: string) => void;
   disabled: boolean;
 }) {
-  const [scroll, setScroll] = useState({ top: 0, left: 0 });
+  const editorRef = useRef<HTMLPreElement>(null);
+  const selectionOffsetRef = useRef<number | null>(null);
+  const [activeLine, setActiveLine] = useState(1);
+  const [selectedLineRange, setSelectedLineRange] = useState({ start: 1, end: 1 });
+  const lineNumbers = useMemo(
+    () => Array.from({ length: Math.max(1, value.split('\n').length) }, (_, index) => index + 1),
+    [value],
+  );
 
-  const handleScroll = (event: UIEvent<HTMLTextAreaElement>) => {
-    setScroll({
-      top: event.currentTarget.scrollTop,
-      left: event.currentTarget.scrollLeft,
-    });
+  useLayoutEffect(() => {
+    const editor = editorRef.current;
+
+    if (editor && selectionOffsetRef.current !== null) {
+      restoreSelectionOffset(editor, selectionOffsetRef.current);
+      selectionOffsetRef.current = null;
+    }
+  }, [highlightedValue]);
+
+  useEffect(() => {
+    const handleSelectionChange = () => updateSelectedLines();
+
+    document.addEventListener('selectionchange', handleSelectionChange);
+    return () => document.removeEventListener('selectionchange', handleSelectionChange);
+  }, [value]);
+
+  const handleInput = () => {
+    const editor = editorRef.current;
+    if (!editor) return;
+
+    const selectionOffset = getSelectionOffset(editor);
+    selectionOffsetRef.current = selectionOffset;
+    setActiveLine(getLineNumberFromOffset(value, selectionOffset));
+    updateSelectedLines();
+    onChange(getEditableText(editor));
+  };
+
+  const handleKeyDown = (event: KeyboardEvent<HTMLPreElement>) => {
+    if (event.key !== 'Tab') {
+      requestAnimationFrame(updateActiveLine);
+      return;
+    }
+
+    event.preventDefault();
+    document.execCommand('insertText', false, '  ');
+    handleInput();
+  };
+
+  const handlePaste = (event: ClipboardEvent<HTMLPreElement>) => {
+    event.preventDefault();
+    document.execCommand('insertText', false, event.clipboardData.getData('text/plain'));
+    handleInput();
+  };
+
+  const updateActiveLine = () => {
+    const editor = editorRef.current;
+    if (!editor) return;
+
+    const editorText = getEditableText(editor);
+    const selectionOffset = getSelectionOffset(editor);
+
+    setActiveLine(getLineNumberFromOffset(editorText, selectionOffset));
+    updateSelectedLines();
+  };
+
+  const updateSelectedLines = () => {
+    const editor = editorRef.current;
+    if (!editor) return;
+
+    const range = getSelectionLineRange(editor);
+    if (!range) return;
+
+    setActiveLine(range.end);
+    setSelectedLineRange(range);
   };
 
   return (
-    <div className="absolute inset-0 overflow-hidden bg-[#070707]">
-      <pre
-        aria-hidden="true"
-        className="pointer-events-none absolute inset-0 overflow-hidden p-4 font-mono text-[13px] leading-relaxed text-zinc-300"
-        style={{ transform: `translate(${-scroll.left}px, ${-scroll.top}px)` }}
-      >
-        <code>{highlightedValue.length ? highlightedValue : <span>&nbsp;</span>}</code>
-      </pre>
-      <textarea
-        className="absolute inset-0 h-full w-full resize-none overflow-auto border-none bg-transparent p-4 font-mono text-[13px] leading-relaxed text-transparent caret-orange-300 placeholder-zinc-700 selection:bg-orange-500/25 focus:outline-none focus:ring-0"
-        placeholder="File content..."
-        spellCheck={false}
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-        onScroll={handleScroll}
-        disabled={disabled}
-        autoCapitalize="off"
-        autoCorrect="off"
-      />
+    <div className="absolute inset-0 overflow-auto bg-[#070707] font-mono text-[13px] leading-relaxed">
+      <div className="flex min-h-full w-max min-w-full items-stretch">
+        <div
+          aria-hidden="true"
+          className="sticky left-0 z-10 select-none border-r border-zinc-900 bg-[#070707] py-4 pl-3 pr-3 text-right text-zinc-600"
+        >
+          {lineNumbers.map((lineNumber) => (
+            <div
+              key={lineNumber}
+              className={`rounded px-1 transition-colors duration-75 ${getLineNumberClassName(lineNumber, activeLine, selectedLineRange)}`}
+            >
+              {lineNumber}
+            </div>
+          ))}
+        </div>
+        <pre
+          ref={editorRef}
+          className="min-h-full min-w-0 flex-1 whitespace-pre py-4 pl-4 pr-4 text-zinc-300 caret-orange-300 selection:bg-orange-500/25 focus:outline-none focus:ring-0"
+          contentEditable={!disabled}
+          suppressContentEditableWarning
+          spellCheck={false}
+          role="textbox"
+          aria-label="Config file content"
+          aria-multiline="true"
+          onInput={handleInput}
+          onKeyDown={handleKeyDown}
+          onClick={updateActiveLine}
+          onKeyUp={updateActiveLine}
+          onPaste={handlePaste}
+        >
+          <code>{highlightedValue.length ? highlightedValue : <span>&nbsp;</span>}</code>
+        </pre>
+      </div>
     </div>
   );
+}
+
+function getEditableText(element: HTMLElement) {
+  return getNodeText(element).replace(/\u00a0/g, ' ');
+}
+
+function getNodeText(node: Node): string {
+  if (node.nodeType === Node.TEXT_NODE) {
+    return node.textContent || '';
+  }
+
+  if (node instanceof HTMLBRElement) {
+    return '\n';
+  }
+
+  let text = '';
+  node.childNodes.forEach((child, index) => {
+    if (index > 0 && child instanceof HTMLDivElement) {
+      text += '\n';
+    }
+
+    text += getNodeText(child);
+  });
+
+  return text;
+}
+
+function getSelectionOffset(element: HTMLElement) {
+  const selection = window.getSelection();
+
+  if (!selection || selection.rangeCount === 0) {
+    return 0;
+  }
+
+  const range = selection.getRangeAt(0);
+  const leadingRange = range.cloneRange();
+  leadingRange.selectNodeContents(element);
+  leadingRange.setEnd(range.endContainer, range.endOffset);
+
+  return leadingRange.toString().length;
+}
+
+function getSelectionLineRange(element: HTMLElement) {
+  const selection = window.getSelection();
+
+  if (!selection || selection.rangeCount === 0) {
+    return null;
+  }
+
+  const range = selection.getRangeAt(0);
+  if (!element.contains(range.startContainer) || !element.contains(range.endContainer)) {
+    return null;
+  }
+
+  const editorText = getEditableText(element);
+  const startOffset = getOffsetForRangeBoundary(element, range.startContainer, range.startOffset);
+  const endOffset = getOffsetForRangeBoundary(element, range.endContainer, range.endOffset);
+  const startLine = getLineNumberFromOffset(editorText, Math.min(startOffset, endOffset));
+  const endLine = getLineNumberFromOffset(editorText, Math.max(startOffset, endOffset));
+
+  return { start: startLine, end: endLine };
+}
+
+function getOffsetForRangeBoundary(element: HTMLElement, container: Node, offset: number) {
+  const range = document.createRange();
+  range.selectNodeContents(element);
+  range.setEnd(container, offset);
+
+  return range.toString().length;
+}
+
+function getLineNumberFromOffset(text: string, offset: number) {
+  return text.slice(0, Math.max(0, offset)).split('\n').length;
+}
+
+function getLineNumberClassName(
+  lineNumber: number,
+  activeLine: number,
+  selectedLineRange: { start: number; end: number },
+) {
+  if (lineNumber === activeLine) {
+    return 'bg-zinc-800/80 text-white';
+  }
+
+  if (lineNumber >= selectedLineRange.start && lineNumber <= selectedLineRange.end) {
+    return 'bg-zinc-900 text-white';
+  }
+
+  return 'text-zinc-600';
+}
+
+function restoreSelectionOffset(element: HTMLElement, offset: number) {
+  const selection = window.getSelection();
+  if (!selection) return;
+
+  const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+  let currentOffset = 0;
+  let currentNode = walker.nextNode();
+
+  while (currentNode) {
+    const textLength = currentNode.textContent?.length || 0;
+
+    if (currentOffset + textLength >= offset) {
+      const range = document.createRange();
+      range.setStart(currentNode, Math.max(0, offset - currentOffset));
+      range.collapse(true);
+      selection.removeAllRanges();
+      selection.addRange(range);
+      return;
+    }
+
+    currentOffset += textLength;
+    currentNode = walker.nextNode();
+  }
+
+  const range = document.createRange();
+  range.selectNodeContents(element);
+  range.collapse(false);
+  selection.removeAllRanges();
+  selection.addRange(range);
 }
 
 function getLanguageFromFile(filename: string | null): SyntaxLanguage {
