@@ -1,6 +1,7 @@
 import express from "express";
 import { createServer as createViteServer } from "vite";
 import path from "path";
+import dgram from "dgram";
 import mysql from "mysql2/promise";
 import jwt from "jsonwebtoken";
 import bcrypt from "bcryptjs";
@@ -24,6 +25,92 @@ async function startServer() {
   };
 
   addLog('INFO', 'Portside Server starting...');
+
+  const fetchFiveMJson = async (endpoint: string) => {
+    if (!process.env.FIVEM_SERVER_URL) {
+      throw new Error('FIVEM_SERVER_URL is not configured');
+    }
+
+    const response = await fetch(`${process.env.FIVEM_SERVER_URL}${endpoint}`);
+    if (!response.ok) {
+      throw new Error(`FiveM request failed: ${response.status} ${response.statusText}`);
+    }
+
+    return response.json();
+  };
+
+  const getRconConfig = () => {
+    if (!process.env.FIVEM_RCON_PASSWORD) {
+      throw new Error('FIVEM_RCON_PASSWORD is not configured');
+    }
+
+    const serverUrl = process.env.FIVEM_SERVER_URL ? new URL(process.env.FIVEM_SERVER_URL) : null;
+    const serverHost = serverUrl?.hostname === 'localhost' ? '127.0.0.1' : serverUrl?.hostname;
+
+    return {
+      host: process.env.FIVEM_RCON_HOST || serverHost || '127.0.0.1',
+      port: Number(process.env.FIVEM_RCON_PORT || serverUrl?.port || 30120),
+      password: process.env.FIVEM_RCON_PASSWORD
+    };
+  };
+
+  const sendRconCommand = (command: string) => new Promise<string>((resolve, reject) => {
+    const config = getRconConfig();
+    const socket = dgram.createSocket('udp4');
+    let settled = false;
+
+    const settle = (callback: () => void) => {
+      if (settled) return;
+      settled = true;
+      socket.close();
+      callback();
+    };
+
+    const timeout = setTimeout(() => {
+      settle(() => reject(new Error('RCON request timed out')));
+    }, 5000);
+
+    socket.once('message', data => {
+      clearTimeout(timeout);
+      const output = data.subarray(4).toString('utf8').trim();
+      if (/bad rcon/i.test(output)) {
+        settle(() => reject(new Error('RCON authentication failed')));
+        return;
+      }
+
+      settle(() => resolve(output.replace(/^print\n?/, '').trim()));
+    });
+
+    socket.on('error', err => {
+      clearTimeout(timeout);
+      settle(() => reject(err));
+    });
+
+    const payload = Buffer.concat([
+      Buffer.from([0xff, 0xff, 0xff, 0xff]),
+      Buffer.from(`rcon ${config.password} ${command}`, 'utf8')
+    ]);
+
+    socket.send(payload, config.port, config.host, err => {
+      if (err) {
+        clearTimeout(timeout);
+        settle(() => reject(err));
+      }
+    });
+  });
+
+  const runRconCommand = async (command: string) => {
+    addLog('COMMAND', command, 'rcon');
+    const output = await sendRconCommand(command);
+    addLog('INFO', output || `RCON command completed: ${command}`, 'rcon');
+    return output;
+  };
+
+  const assertSafeResourceName = (name: string) => {
+    if (!/^[\w.-]+$/.test(name)) {
+      throw new Error('Invalid resource name');
+    }
+  };
 
   // Database Connection
   let dbPool;
@@ -110,7 +197,7 @@ async function startServer() {
           const fetchObj = await fetch(`${process.env.FIVEM_SERVER_URL}/info.json`);
           if (fetchObj.ok) {
              const info = await fetchObj.json();
-             maxPlayers = info.vars?.sv_maxClients || 64;
+             maxPlayers = Number(info.vars?.sv_maxClients || 64);
              online = true;
           }
           const dynObj = await fetch(`${process.env.FIVEM_SERVER_URL}/dynamic.json`);
@@ -143,33 +230,94 @@ async function startServer() {
 
   // Get Players
   app.get("/api/players", authenticateToken, async (req, res) => {
-     // Mocking real-time synchronization from external FiveM players.json
-     const mockPlayers = [
-       { id: 1, name: "thevindu", ping: 42, identifiers: ["steam:11000010abc1234"], role: "owner" },
-       { id: 2, name: "john_doe", ping: 120, identifiers: ["steam:1100001bcdef987"], role: "player" },
-       { id: 4, name: "gamer99", ping: 15, identifiers: ["steam:110000155555555"], role: "admin" }
-     ];
-     res.json(mockPlayers);
+    try {
+      if (!process.env.FIVEM_SERVER_URL) {
+        return res.json([
+          { id: 1, name: "thevindu", ping: 42, identifiers: ["steam:11000010abc1234"], role: "owner" },
+          { id: 2, name: "john_doe", ping: 120, identifiers: ["steam:1100001bcdef987"], role: "player" },
+          { id: 4, name: "gamer99", ping: 15, identifiers: ["steam:110000155555555"], role: "admin" }
+        ]);
+      }
+
+      const players = await fetchFiveMJson('/players.json');
+      res.json(players.map((player: any) => ({
+        id: player.id,
+        name: player.name,
+        ping: player.ping || 0,
+        identifiers: player.identifiers || [],
+        role: 'player'
+      })));
+    } catch (err: any) {
+      addLog('ERROR', `Could not fetch FiveM players: ${err.message}`, 'system');
+      res.status(502).json({ error: 'Failed to fetch FiveM players' });
+    }
   });
 
   // Kick Player
-  app.post("/api/players/:id/kick", authenticateToken, (req, res) => {
-    const { id } = req.params;
-    addLog('INFO', `Kicked player with ID ${id}`, 'system');
-    res.json({ success: true, message: `Player ${id} kicked successfully` });
+  app.post("/api/players/:id/kick", authenticateToken, async (req, res) => {
+    try {
+      const { id } = req.params;
+      const reason = typeof req.body?.reason === 'string' && req.body.reason.trim()
+        ? req.body.reason.trim()
+        : 'Kicked by Portside';
+
+      if (!/^\d+$/.test(id)) {
+        return res.status(400).json({ error: 'Invalid player id' });
+      }
+
+      await runRconCommand(`clientkick ${id} ${reason}`);
+      res.json({ success: true, message: `Player ${id} kicked successfully` });
+    } catch (err: any) {
+      res.status(502).json({ error: err.message || 'Failed to kick player' });
+    }
   });
 
   // Ban Player
-  app.post("/api/players/:id/ban", authenticateToken, (req, res) => {
-    const { id } = req.params;
-    const { reason, duration } = req.body;
-    addLog('INFO', `Banned player with ID ${id}. Reason: ${reason}, Duration: ${duration}`, 'system');
-    res.json({ success: true, message: `Player ${id} banned successfully` });
+  app.post("/api/players/:id/ban", authenticateToken, async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { reason = 'Banned by Portside', duration = 'permanent' } = req.body || {};
+
+      if (!/^\d+$/.test(id)) {
+        return res.status(400).json({ error: 'Invalid player id' });
+      }
+
+      if (!process.env.FIVEM_RCON_BAN_COMMAND) {
+        return res.status(501).json({
+          error: 'Ban command is not configured. Set FIVEM_RCON_BAN_COMMAND for your framework.'
+        });
+      }
+
+      const command = process.env.FIVEM_RCON_BAN_COMMAND
+        .replaceAll('{id}', id)
+        .replaceAll('{reason}', String(reason).trim())
+        .replaceAll('{duration}', String(duration).trim());
+
+      await runRconCommand(command);
+      res.json({ success: true, message: `Player ${id} banned successfully` });
+    } catch (err: any) {
+      res.status(502).json({ error: err.message || 'Failed to ban player' });
+    }
   });
 
   // Get Logs
   app.get("/api/logs", authenticateToken, (req, res) => {
     res.json(logs.slice(-100).reverse());
+  });
+
+  app.post("/api/console/command", authenticateToken, async (req, res) => {
+    try {
+      const { command } = req.body;
+      if (typeof command !== 'string' || !command.trim()) {
+        return res.status(400).json({ error: 'Command required' });
+      }
+
+      const output = await runRconCommand(command.trim());
+      res.json({ success: true, output });
+    } catch (err: any) {
+      addLog('ERROR', `RCON command failed: ${err.message}`, 'rcon');
+      res.status(502).json({ error: err.message || 'RCON command failed' });
+    }
   });
 
   // DB Test / Schema fetching
@@ -235,43 +383,59 @@ async function startServer() {
     { name: "vMenu", state: "started", version: "3.5.0", author: "Vesura", description: "Server sidemenu for players and admins.", dependencies: [], logs: "vMenu: Permissions loaded." }
   ];
 
-  app.get("/api/resources", authenticateToken, (req, res) => {
-    res.json(mockResources);
-  });
+  app.get("/api/resources", authenticateToken, async (req, res) => {
+    try {
+      if (!process.env.FIVEM_SERVER_URL) {
+        return res.json(mockResources);
+      }
 
-  app.post("/api/resources/:name/start", authenticateToken, (req, res) => {
-    const { name } = req.params;
-    const resource = mockResources.find(r => r.name === name);
-    if (resource) {
-      resource.state = "started";
-      addLog('INFO', `Resource ${name} started`, 'system');
-      res.json({ success: true, resource });
-    } else {
-      res.status(404).json({ error: 'Resource not found' });
+      const info = await fetchFiveMJson('/info.json');
+      const resources = Array.isArray(info.resources) ? info.resources : [];
+      res.json(resources.map((name: string) => ({
+        name,
+        state: 'started',
+        version: undefined,
+        author: undefined,
+        description: 'Live resource reported by the FiveM server manifest.',
+        dependencies: [],
+        logs: `${name}: reported by ${process.env.FIVEM_SERVER_URL}/info.json`
+      })));
+    } catch (err: any) {
+      addLog('ERROR', `Could not fetch FiveM resources: ${err.message}`, 'system');
+      res.status(502).json({ error: 'Failed to fetch FiveM resources' });
     }
   });
 
-  app.post("/api/resources/:name/stop", authenticateToken, (req, res) => {
-    const { name } = req.params;
-    const resource = mockResources.find(r => r.name === name);
-    if (resource) {
-      resource.state = "stopped";
-      addLog('INFO', `Resource ${name} stopped`, 'system');
-      res.json({ success: true, resource });
-    } else {
-      res.status(404).json({ error: 'Resource not found' });
+  app.post("/api/resources/:name/start", authenticateToken, async (req, res) => {
+    try {
+      const { name } = req.params;
+      assertSafeResourceName(name);
+      await runRconCommand(`start ${name}`);
+      res.json({ success: true, resource: { name, state: 'started' } });
+    } catch (err: any) {
+      res.status(502).json({ error: err.message || 'Failed to start resource' });
     }
   });
 
-  app.post("/api/resources/:name/restart", authenticateToken, (req, res) => {
-    const { name } = req.params;
-    const resource = mockResources.find(r => r.name === name);
-    if (resource) {
-      resource.state = "started";
-      addLog('INFO', `Resource ${name} restarted`, 'system');
-      res.json({ success: true, resource });
-    } else {
-      res.status(404).json({ error: 'Resource not found' });
+  app.post("/api/resources/:name/stop", authenticateToken, async (req, res) => {
+    try {
+      const { name } = req.params;
+      assertSafeResourceName(name);
+      await runRconCommand(`stop ${name}`);
+      res.json({ success: true, resource: { name, state: 'stopped' } });
+    } catch (err: any) {
+      res.status(502).json({ error: err.message || 'Failed to stop resource' });
+    }
+  });
+
+  app.post("/api/resources/:name/restart", authenticateToken, async (req, res) => {
+    try {
+      const { name } = req.params;
+      assertSafeResourceName(name);
+      await runRconCommand(`restart ${name}`);
+      res.json({ success: true, resource: { name, state: 'started' } });
+    } catch (err: any) {
+      res.status(502).json({ error: err.message || 'Failed to restart resource' });
     }
   });
 

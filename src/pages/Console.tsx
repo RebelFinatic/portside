@@ -10,6 +10,115 @@ interface FilterPreset {
   source: string;
 }
 
+const fivemColorClasses: Record<string, string> = {
+  '0': 'text-black',
+  '1': 'text-red-400',
+  '2': 'text-green-400',
+  '3': 'text-yellow-300',
+  '4': 'text-blue-400',
+  '5': 'text-cyan-300',
+  '6': 'text-purple-400',
+  '7': 'text-zinc-300',
+  '8': 'text-orange-400',
+  '9': 'text-zinc-400',
+};
+
+const ansiColorClasses: Record<string, string> = {
+  '30': 'text-black',
+  '31': 'text-red-400',
+  '32': 'text-green-400',
+  '33': 'text-yellow-300',
+  '34': 'text-blue-400',
+  '35': 'text-purple-400',
+  '36': 'text-cyan-300',
+  '37': 'text-zinc-300',
+  '90': 'text-zinc-500',
+  '91': 'text-red-300',
+  '92': 'text-green-300',
+  '93': 'text-yellow-200',
+  '94': 'text-blue-300',
+  '95': 'text-purple-300',
+  '96': 'text-cyan-200',
+  '97': 'text-white',
+};
+
+interface ConsoleSegment {
+  text: string;
+  className: string;
+}
+
+const parseConsoleMessage = (message: string): ConsoleSegment[] => {
+  const segments: ConsoleSegment[] = [];
+  let currentClass = 'text-zinc-300';
+  let buffer = '';
+  let index = 0;
+
+  const pushBuffer = () => {
+    if (!buffer) return;
+    segments.push({text: buffer, className: currentClass});
+    buffer = '';
+  };
+
+  while (index < message.length) {
+    const char = message[index];
+
+    if (char === '^' && index + 1 < message.length) {
+      const code = message[index + 1];
+
+      if (fivemColorClasses[code]) {
+        pushBuffer();
+        currentClass = fivemColorClasses[code];
+        index += 2;
+        continue;
+      }
+    }
+
+    if (char === '\u001b') {
+      const match = message.slice(index).match(/^\u001b\[([0-9;]*)m/);
+      if (match) {
+        pushBuffer();
+        const codes = match[1].split(';').filter(Boolean);
+        if (codes.includes('0')) {
+          currentClass = 'text-zinc-300';
+        }
+
+        const colorCode = [...codes].reverse().find(code => ansiColorClasses[code]);
+        if (colorCode) {
+          currentClass = ansiColorClasses[colorCode];
+        }
+
+        index += match[0].length;
+        continue;
+      }
+    }
+
+    buffer += char;
+    index += 1;
+  }
+
+  pushBuffer();
+  return segments.length ? segments : [{text: message, className: 'text-zinc-300'}];
+};
+
+function ConsoleMessage({message}: {message: string}) {
+  const lines = message.split(/\r?\n/);
+
+  return (
+    <span className="break-words whitespace-pre-wrap">
+      {lines.map((line, lineIndex) => (
+        <React.Fragment key={lineIndex}>
+          {lineIndex > 0 ? <br /> : null}
+          {parseConsoleMessage(line).map((segment, segmentIndex) => (
+            <span key={`${lineIndex}-${segmentIndex}`} className={segment.className}>
+              {segment.text}
+            </span>
+          ))}
+        </React.Fragment>
+      ))}
+    </span>
+  );
+}
+
 export default function Console() {
   const [logs, setLogs] = useState<any[]>([]);
   const [input, setInput] = useState('');
@@ -48,7 +157,7 @@ export default function Console() {
   const fetchLogs = async () => {
     try {
       const data = await apiFetch('/logs');
-      setLogs(data);
+      setLogs([...data].reverse());
     } catch {
       // silent fail for polling
     }
@@ -83,15 +192,11 @@ export default function Console() {
     }
   };
 
-  const handleCommand = (e: React.FormEvent) => {
+  const handleCommand = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!input.trim()) return;
     
     const submittedCommand = input.trim();
-
-    toast('Command dispatched to server', {
-      description: `Executed: ${submittedCommand}`,
-    });
     
     // Optimistic custom log to local array
     setLogs(prev => [...prev, {
@@ -105,6 +210,22 @@ export default function Console() {
     setCommandHistory(prev => [...prev, submittedCommand]);
     setHistoryIndex(-1);
     setInput('');
+
+    try {
+      const result = await apiFetch('/console/command', {
+        method: 'POST',
+        body: JSON.stringify({command: submittedCommand}),
+      });
+
+      toast.success('Command sent through RCON', {
+        description: result.output || submittedCommand,
+      });
+      fetchLogs();
+    } catch (error: any) {
+      toast.error('RCON command failed', {
+        description: error.message || submittedCommand,
+      });
+    }
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -230,7 +351,7 @@ export default function Console() {
               <span className="text-zinc-500 shrink-0">[{format(new Date(log.timestamp), 'HH:mm:ss')}]</span>
               <span className={`w-16 shrink-0 font-bold ${getLevelColor(log.level)}`}>{log.level}</span>
               <span className="text-zinc-500 w-20 shrink-0 truncate">[{log.source}]</span>
-              <span className="text-zinc-300 break-all">{log.message}</span>
+              <ConsoleMessage message={log.message} />
             </div>
           ))}
           <div className="text-zinc-500 text-white animate-pulse mt-2 px-2">_</div>
