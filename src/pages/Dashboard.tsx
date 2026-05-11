@@ -1,230 +1,480 @@
-import { useState, useEffect } from 'react';
-import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, LineChart, Line, BarChart, Bar, Legend } from 'recharts';
-import { Server, Users, Activity, Clock, Cpu, HardDrive, AlertTriangle } from 'lucide-react';
+import React, { ReactNode, useEffect, useMemo, useState } from 'react';
+import { Link } from 'react-router-dom';
+import {
+  Activity,
+  AlertTriangle,
+  ChevronRight,
+  Clock,
+  Cpu,
+  Database,
+  FileCode2,
+  HardDrive,
+  Loader2,
+  Radio,
+  RefreshCw,
+  Server,
+  TerminalSquare,
+  Users,
+  Zap,
+} from 'lucide-react';
+import {
+  Area,
+  AreaChart,
+  Bar,
+  BarChart,
+  CartesianGrid,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from 'recharts';
+import { formatDistanceToNowStrict } from 'date-fns';
 import { apiFetch } from '../lib/api';
 import { toast } from 'sonner';
 
+interface ServerStatus {
+  online: boolean;
+  players: number;
+  maxPlayers: number;
+  cpuUsage: number;
+  memoryUsage: number;
+  uptime: string;
+}
+
+interface Player {
+  id: number;
+  name: string;
+  ping?: number;
+  role?: string;
+}
+
+interface Resource {
+  name: string;
+  state: string;
+}
+
+interface LogEntry {
+  id: string;
+  timestamp: string;
+  level: string;
+  message: string;
+  source: string;
+}
+
+interface MetricSample {
+  time: string;
+  players: number;
+  cpu: number;
+  memory: number;
+}
+
+const chartText = '#71717a';
+const gridStroke = '#27272a';
+
 export default function Dashboard() {
-  const [status, setStatus] = useState<any>(null);
+  const [status, setStatus] = useState<ServerStatus | null>(null);
+  const [players, setPlayers] = useState<Player[]>([]);
+  const [resources, setResources] = useState<Resource[]>([]);
+  const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [samples, setSamples] = useState<MetricSample[]>([]);
   const [loading, setLoading] = useState(true);
-  const [graphData, setGraphData] = useState<any[]>([]);
-  const [playerHistory, setPlayerHistory] = useState<any[]>([]);
-  const [errorTrends, setErrorTrends] = useState<any[]>([]);
+  const [refreshing, setRefreshing] = useState(false);
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
+
+  const fetchDashboard = async ({ silent = false } = {}) => {
+    if (!silent) setRefreshing(true);
+
+    try {
+      const [nextStatus, nextPlayers, nextResources, nextLogs] = await Promise.all([
+        apiFetch('/server/status'),
+        apiFetch('/players'),
+        apiFetch('/resources'),
+        apiFetch('/logs'),
+      ]);
+
+      setStatus(nextStatus);
+      setPlayers(Array.isArray(nextPlayers) ? nextPlayers : []);
+      setResources(Array.isArray(nextResources) ? nextResources : []);
+      setLogs(Array.isArray(nextLogs) ? nextLogs : []);
+      setLastUpdated(new Date());
+      setSamples(prev => [
+        ...prev.slice(-35),
+        {
+          time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+          players: nextStatus.players || 0,
+          cpu: nextStatus.cpuUsage || 0,
+          memory: nextStatus.memoryUsage || 0,
+        },
+      ]);
+    } catch (error) {
+      if (!silent) {
+        toast.error('Failed to refresh dashboard');
+      }
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  };
 
   useEffect(() => {
-    // Generate initial flat data
-    const initialData = Array.from({ length: 20 }).map((_, i) => ({
-      name: i.toString(),
-      cpu: 0,
-       ram: 0,
-    }));
-    setGraphData(initialData);
-
-    // Generate mock historical data for players (last 24h)
-    const history = Array.from({ length: 24 }).map((_, i) => ({
-      time: `${i}:00`,
-      players: Math.floor(Math.random() * 40) + 10,
-      peak: Math.floor(Math.random() * 60) + 20
-    }));
-    setPlayerHistory(history);
-
-    // Generate mock error trends
-    const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
-    const errors = days.map(day => ({
-      day,
-      warnings: Math.floor(Math.random() * 30),
-      errors: Math.floor(Math.random() * 8)
-    }));
-    setErrorTrends(errors);
-
-    const fetchStatus = async () => {
-      try {
-        const data = await apiFetch('/server/status');
-        setStatus(data);
-        
-        // Update graph data
-        setGraphData(prev => {
-          const newArr = [...prev.slice(1), { name: Date.now().toString(), cpu: data.cpuUsage, ram: data.memoryUsage }];
-          return newArr;
-        });
-        
-        setLoading(false);
-      } catch (err) {
-        toast.error('Failed to fetch server status');
-        setLoading(false);
-      }
-    };
-
-    fetchStatus();
-    const interval = setInterval(fetchStatus, 3000); // Polling every 3s
-    return () => clearInterval(interval);
+    fetchDashboard();
+    const interval = window.setInterval(() => fetchDashboard({ silent: true }), 5000);
+    return () => window.clearInterval(interval);
   }, []);
 
-  if (loading && !status) return <div className="p-8 flex justify-center"><Activity className="animate-spin text-[#FF4E00]" /></div>;
+  const runningResources = resources.filter(resource => resource.state === 'started').length;
+  const stoppedResources = Math.max(resources.length - runningResources, 0);
+  const playerCapacity = status?.maxPlayers ? Math.round(((status.players || 0) / status.maxPlayers) * 100) : 0;
+  const avgPing = players.length
+    ? Math.round(players.reduce((total, player) => total + (player.ping || 0), 0) / players.length)
+    : 0;
+  const staffOnline = players.filter(player => player.role === 'admin' || player.role === 'owner').length;
+
+  const logStats = useMemo(() => {
+    const counts = { errors: 0, warnings: 0, commands: 0, info: 0 };
+
+    logs.forEach(log => {
+      if (log.level === 'ERROR') counts.errors += 1;
+      else if (log.level === 'WARN') counts.warnings += 1;
+      else if (log.level === 'COMMAND') counts.commands += 1;
+      else counts.info += 1;
+    });
+
+    return counts;
+  }, [logs]);
+
+  const logChartData = [
+    { name: 'Info', value: logStats.info, fill: '#71717a' },
+    { name: 'Warn', value: logStats.warnings, fill: '#eab308' },
+    { name: 'Error', value: logStats.errors, fill: '#ef4444' },
+    { name: 'Cmd', value: logStats.commands, fill: '#a855f7' },
+  ];
+
+  const recentLogs = logs.slice(0, 6);
+  const recentPlayers = [...players].sort((a, b) => (a.ping || 0) - (b.ping || 0)).slice(0, 6);
+
+  if (loading && !status) {
+    return (
+      <div className="flex flex-1 items-center justify-center p-8">
+        <div className="flex items-center gap-3 text-sm text-zinc-400">
+          <Loader2 className="h-5 w-5 animate-spin text-orange-500" />
+          Loading live dashboard...
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="flex-1 flex flex-col relative w-full h-full p-6 lg:p-8 overflow-y-auto overflow-x-hidden">
-      <div className="mb-8 flex flex-col gap-1">
-        <h1 className="text-2xl font-bold tracking-tight text-white m-0">Analytics Dashboard</h1>
-        <p className="text-sm text-zinc-500 m-0">Real-time metrics and historical trends</p>
-      </div>
-
-      {/* Primary Stats Grid */}
-      <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-4 mb-8">
-        <div className="bg-[#111] border border-zinc-800 rounded-xl p-5 flex items-center shadow-sm">
-          <div className="p-3 rounded-xl bg-blue-500/10 text-blue-500 border border-blue-500/20">
-            <Users className="h-5 w-5" />
-          </div>
-          <div className="ml-4">
-            <p className="text-[10px] font-bold uppercase tracking-widest text-zinc-500 mb-0.5">Players</p>
-            <div className="flex items-baseline">
-              <h3 className="text-2xl font-semibold text-white">{status?.players || 0}</h3>
-              <span className="ml-1.5 text-xs text-zinc-500 font-medium">/ {status?.maxPlayers || 64}</span>
-            </div>
-          </div>
+      <div className="mb-6 flex flex-col gap-4 border-b border-zinc-800/50 pb-6 lg:flex-row lg:items-center lg:justify-between">
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight text-white m-0">Dashboard</h1>
+          <p className="text-sm text-zinc-500 m-0">
+            Live FiveM health, players, resources, and operational activity.
+          </p>
         </div>
 
-        <div className="bg-[#111] border border-zinc-800 rounded-xl p-5 flex items-center shadow-sm">
-          <div className="p-3 rounded-xl bg-orange-600/10 text-orange-500 border border-orange-600/20">
-            <Cpu className="h-5 w-5" />
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+          <div className="flex items-center gap-2 rounded border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs text-zinc-400">
+            <span className={`h-2 w-2 rounded-full ${status?.online ? 'bg-emerald-400' : 'bg-red-500'}`} />
+            <span className="font-mono uppercase tracking-wider">{status?.online ? 'Server Online' : 'Server Offline'}</span>
           </div>
-          <div className="ml-4">
-            <p className="text-[10px] font-bold uppercase tracking-widest text-zinc-500 mb-0.5">CPU Usage</p>
-            <div className="flex items-baseline">
-              <h3 className="text-2xl font-semibold text-white">{status?.cpuUsage || 0}</h3>
-              <span className="ml-1 text-xs font-mono text-zinc-500">%</span>
-            </div>
-          </div>
-        </div>
-
-        <div className="bg-[#111] border border-zinc-800 rounded-xl p-5 flex items-center shadow-sm">
-          <div className="p-3 rounded-xl bg-purple-500/10 text-purple-400 border border-purple-500/20">
-            <HardDrive className="h-5 w-5" />
-          </div>
-          <div className="ml-4">
-            <p className="text-[10px] font-bold uppercase tracking-widest text-zinc-500 mb-0.5">Memory</p>
-            <div className="flex items-baseline">
-              <h3 className="text-2xl font-semibold text-white">{status?.memoryUsage || 0}</h3>
-              <span className="ml-1 text-xs font-mono text-zinc-500">%</span>
-            </div>
-          </div>
-        </div>
-
-        <div className="bg-[#111] border border-zinc-800 rounded-xl p-5 flex items-center shadow-sm">
-          <div className="p-3 rounded-xl bg-green-500/10 text-green-500 border border-green-500/20">
-            <Clock className="h-5 w-5" />
-          </div>
-          <div className="ml-4">
-            <p className="text-[10px] font-bold uppercase tracking-widest text-zinc-500 mb-0.5">Uptime</p>
-            <div className="flex items-baseline">
-              <h3 className="text-xl font-semibold text-white">{status?.uptime || '0h'}</h3>
-            </div>
-          </div>
+          <button
+            onClick={() => fetchDashboard()}
+            disabled={refreshing}
+            className="inline-flex items-center justify-center gap-2 rounded border border-zinc-800 bg-zinc-900 px-3 py-2 text-xs font-bold uppercase tracking-wider text-white transition-colors hover:border-zinc-700 hover:bg-zinc-800 disabled:opacity-60"
+          >
+            {refreshing ? <Loader2 className="h-3.5 w-3.5 animate-spin text-orange-500" /> : <RefreshCw className="h-3.5 w-3.5 text-zinc-400" />}
+            Refresh
+          </button>
         </div>
       </div>
 
-      {/* Charts Section */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8 shrink-0">
-        <div className="lg:col-span-2 bg-[#111] border border-zinc-800 rounded-xl p-6 flex flex-col min-h-[320px] shadow-sm">
-          <h3 className="text-[10px] font-bold uppercase tracking-widest text-zinc-400 mb-6 flex items-center">
-            <Activity className="w-3.5 h-3.5 mr-2 text-orange-500" /> Hardware Utilization (Live)
-          </h3>
-          <div className="flex-1 min-h-0 w-full">
+      <div className="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        <MetricCard
+          icon={<Users className="h-5 w-5" />}
+          label="Players"
+          value={`${status?.players ?? 0}/${status?.maxPlayers ?? 0}`}
+          detail={`${playerCapacity}% capacity`}
+          tone="blue"
+        />
+        <MetricCard
+          icon={<Cpu className="h-5 w-5" />}
+          label="CPU"
+          value={`${status?.cpuUsage ?? 0}%`}
+          detail="reported by Portside"
+          tone="orange"
+        />
+        <MetricCard
+          icon={<HardDrive className="h-5 w-5" />}
+          label="Memory"
+          value={`${status?.memoryUsage ?? 0}%`}
+          detail="reported by Portside"
+          tone="violet"
+        />
+        <MetricCard
+          icon={<Clock className="h-5 w-5" />}
+          label="Uptime"
+          value={status?.uptime || 'unknown'}
+          detail={lastUpdated ? `updated ${formatDistanceToNowStrict(lastUpdated, { addSuffix: true })}` : 'waiting for update'}
+          tone="green"
+        />
+      </div>
+
+      <div className="mb-6 grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1.4fr)_minmax(360px,0.8fr)]">
+        <Panel
+          title="Live Utilization"
+          subtitle="Session samples from dashboard polling"
+          icon={<Activity className="h-4 w-4" />}
+        >
+          <div className="h-[300px] w-full">
             <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={graphData} margin={{ top: 0, right: 0, left: -20, bottom: 0 }}>
+              <AreaChart data={samples} margin={{ top: 8, right: 10, left: -24, bottom: 0 }}>
                 <defs>
-                  <linearGradient id="colorCpu" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#ea580c" stopOpacity={0.3}/>
-                    <stop offset="95%" stopColor="#ea580c" stopOpacity={0}/>
+                  <linearGradient id="cpuGradient" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor="#ea580c" stopOpacity={0.3} />
+                    <stop offset="95%" stopColor="#ea580c" stopOpacity={0} />
                   </linearGradient>
-                  <linearGradient id="colorRam" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#c084fc" stopOpacity={0.3}/>
-                    <stop offset="95%" stopColor="#c084fc" stopOpacity={0}/>
+                  <linearGradient id="memoryGradient" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor="#a855f7" stopOpacity={0.25} />
+                    <stop offset="95%" stopColor="#a855f7" stopOpacity={0} />
+                  </linearGradient>
+                  <linearGradient id="playerGradient" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor="#3b82f6" stopOpacity={0.24} />
+                    <stop offset="95%" stopColor="#3b82f6" stopOpacity={0} />
                   </linearGradient>
                 </defs>
-                <CartesianGrid strokeDasharray="3 3" stroke="#27272a" vertical={false} />
-                <XAxis dataKey="name" hide />
-                <YAxis stroke="#71717a" fontSize={11} tickLine={false} axisLine={false} />
-                <Tooltip 
+                <CartesianGrid strokeDasharray="3 3" stroke={gridStroke} vertical={false} />
+                <XAxis dataKey="time" hide />
+                <YAxis stroke={chartText} fontSize={11} tickLine={false} axisLine={false} domain={[0, 100]} />
+                <Tooltip
                   contentStyle={{ backgroundColor: '#0a0a0a', borderColor: '#27272a', borderRadius: '8px', fontSize: '12px' }}
                   itemStyle={{ color: '#d4d4d8' }}
                 />
-                <Area type="monotone" dataKey="cpu" name="CPU %" stroke="#ea580c" strokeWidth={2} fillOpacity={1} fill="url(#colorCpu)" />
-                <Area type="monotone" dataKey="ram" name="RAM %" stroke="#c084fc" strokeWidth={2} fillOpacity={1} fill="url(#colorRam)" />
+                <Area type="monotone" dataKey="cpu" name="CPU %" stroke="#ea580c" strokeWidth={2} fill="url(#cpuGradient)" />
+                <Area type="monotone" dataKey="memory" name="Memory %" stroke="#a855f7" strokeWidth={2} fill="url(#memoryGradient)" />
+                <Area type="monotone" dataKey="players" name="Players" stroke="#3b82f6" strokeWidth={2} fill="url(#playerGradient)" />
               </AreaChart>
             </ResponsiveContainer>
           </div>
-        </div>
+        </Panel>
 
-        <div className="bg-[#111] border border-zinc-800 rounded-xl p-5 flex flex-col shadow-sm">
-          <h3 className="text-[10px] font-bold uppercase tracking-widest text-zinc-400 mb-6 flex items-center">
-            <AlertTriangle className="w-3.5 h-3.5 mr-2 text-yellow-500" /> Server Errors (Weekly)
-          </h3>
-          <div className="flex-1 min-h-0 w-full min-h-[220px]">
+        <Panel
+          title="Log Health"
+          subtitle="Last 100 server log entries"
+          icon={<AlertTriangle className="h-4 w-4" />}
+        >
+          <div className="h-[220px] w-full">
             <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={errorTrends} margin={{ top: 0, right: 0, left: -20, bottom: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#27272a" vertical={false} />
-                <XAxis dataKey="day" stroke="#71717a" fontSize={11} tickLine={false} axisLine={false} />
-                <YAxis stroke="#71717a" fontSize={11} tickLine={false} axisLine={false} />
-                <Tooltip 
+              <BarChart data={logChartData} margin={{ top: 8, right: 8, left: -28, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke={gridStroke} vertical={false} />
+                <XAxis dataKey="name" stroke={chartText} fontSize={11} tickLine={false} axisLine={false} />
+                <YAxis stroke={chartText} fontSize={11} tickLine={false} axisLine={false} allowDecimals={false} />
+                <Tooltip
                   contentStyle={{ backgroundColor: '#0a0a0a', borderColor: '#27272a', borderRadius: '8px', fontSize: '12px' }}
-                  cursor={{ fill: '#27272a', opacity: 0.4 }}
+                  cursor={{ fill: '#27272a', opacity: 0.35 }}
                 />
-                <Legend iconType="circle" wrapperStyle={{ fontSize: '11px', color: '#a1a1aa' }} />
-                <Bar dataKey="warnings" name="Warnings" stackId="a" fill="#eab308" radius={[0, 0, 4, 4]} />
-                <Bar dataKey="errors" name="Errors/Crashes" stackId="a" fill="#ef4444" radius={[4, 4, 0, 0]} />
+                <Bar dataKey="value" radius={[4, 4, 0, 0]} />
               </BarChart>
             </ResponsiveContainer>
           </div>
-        </div>
-      </div>
-      
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 pb-6 shrink-0">
-        <div className="bg-[#111] border border-zinc-800 rounded-xl p-6 flex flex-col min-h-[320px] shadow-sm">
-          <h3 className="text-[10px] font-bold uppercase tracking-widest text-zinc-400 mb-6 flex items-center">
-            <Users className="w-3.5 h-3.5 mr-2 text-blue-500" /> Player Activity (24H Trend)
-          </h3>
-          <div className="flex-1 min-h-0 w-full">
-            <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={playerHistory} margin={{ top: 0, right: 0, left: -20, bottom: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#27272a" vertical={false} />
-                <XAxis dataKey="time" stroke="#71717a" fontSize={11} tickLine={false} axisLine={false} tickMargin={10} minTickGap={20} />
-                <YAxis stroke="#71717a" fontSize={11} tickLine={false} axisLine={false} />
-                <Tooltip 
-                  contentStyle={{ backgroundColor: '#0a0a0a', borderColor: '#27272a', borderRadius: '8px', fontSize: '12px' }}
-                />
-                <Legend iconType="circle" wrapperStyle={{ fontSize: '11px' }} />
-                <Line type="monotone" dataKey="players" name="Avg Players" stroke="#3b82f6" strokeWidth={2} dot={false} activeDot={{ r: 4 }} />
-                <Line type="monotone" dataKey="peak" name="Peak Players" stroke="#0ea5e9" strokeWidth={2} dot={false} strokeDasharray="5 5" />
-              </LineChart>
-            </ResponsiveContainer>
+          <div className="mt-4 grid grid-cols-2 gap-3">
+            <SmallStat label="Warnings" value={logStats.warnings} tone="text-yellow-400" />
+            <SmallStat label="Errors" value={logStats.errors} tone="text-red-400" />
           </div>
-        </div>
+        </Panel>
+      </div>
 
-        <div className="bg-[#111] border border-zinc-800 rounded-xl p-6 flex flex-col shadow-sm">
-          <h3 className="text-[10px] font-bold uppercase tracking-widest text-zinc-400 mb-6 flex items-center">
-            <Server className="w-3.5 h-3.5 mr-2 text-zinc-400" /> Actions & Configuration
-          </h3>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-             <button className="text-left p-4 bg-zinc-900 border border-zinc-800 rounded-xl hover:border-zinc-700 hover:bg-zinc-800/50 transition-colors group">
-                <span className="block text-sm font-semibold text-white group-hover:text-orange-500 transition-colors">Restart Server</span>
-                <span className="block text-[#8E9299] text-xs mt-1">Gracefully restart the instance and save state.</span>
-             </button>
-             <button className="text-left p-4 bg-zinc-900 border border-zinc-800 rounded-xl hover:border-zinc-700 hover:bg-zinc-800/50 transition-colors group">
-                <span className="block text-sm font-semibold text-white group-hover:text-blue-500 transition-colors">Clear Cache</span>
-                <span className="block text-[#8E9299] text-xs mt-1">Purge resource cache without stopping.</span>
-             </button>
-             <button className="text-left p-4 bg-zinc-900 border border-zinc-800 rounded-xl hover:border-zinc-700 hover:bg-zinc-800/50 transition-colors group">
-                <span className="block text-sm font-semibold text-white group-hover:text-green-500 transition-colors">Export DB Backup</span>
-                <span className="block text-[#8E9299] text-xs mt-1">Generate a quick snapshot of the database.</span>
-             </button>
-             <button className="text-left p-4 bg-red-950/20 border border-red-900/30 rounded-xl hover:bg-red-900/30 transition-colors group">
-                <span className="block text-sm font-semibold text-red-500">Force Kill (Node)</span>
-                <span className="block text-red-500/70 text-xs mt-1">Terminate process immediately. Unsaved data lost.</span>
-             </button>
+      <div className="mb-6 grid grid-cols-1 gap-6 xl:grid-cols-3">
+        <Panel title="Resource State" subtitle={`${resources.length} resources detected`} icon={<Server className="h-4 w-4" />}>
+          <div className="grid grid-cols-2 gap-3">
+            <SmallStat label="Started" value={runningResources} tone="text-emerald-400" />
+            <SmallStat label="Stopped" value={stoppedResources} tone="text-zinc-400" />
           </div>
+          <div className="mt-5 h-2 overflow-hidden rounded bg-zinc-900">
+            <div
+              className="h-full bg-emerald-500 transition-all"
+              style={{ width: `${resources.length ? (runningResources / resources.length) * 100 : 0}%` }}
+            />
+          </div>
+          <div className="mt-5 space-y-2">
+            {resources.slice(0, 5).map(resource => (
+              <React.Fragment key={resource.name}>
+                <StatusRow label={resource.name} value={resource.state} active={resource.state === 'started'} />
+              </React.Fragment>
+            ))}
+            {resources.length === 0 && <EmptyLine>No resources reported yet.</EmptyLine>}
+          </div>
+        </Panel>
+
+        <Panel title="Players Online" subtitle={`${avgPing || 0}ms average ping`} icon={<Radio className="h-4 w-4" />}>
+          <div className="grid grid-cols-2 gap-3">
+            <SmallStat label="Staff Online" value={staffOnline} tone="text-orange-400" />
+            <SmallStat label="Capacity" value={`${playerCapacity}%`} tone="text-blue-400" />
+          </div>
+          <div className="mt-5 space-y-2">
+            {recentPlayers.map(player => (
+              <React.Fragment key={player.id}>
+                <PlayerRow player={player} />
+              </React.Fragment>
+            ))}
+            {recentPlayers.length === 0 && <EmptyLine>No active players.</EmptyLine>}
+          </div>
+        </Panel>
+
+        <Panel title="Recent Activity" subtitle="Latest platform events" icon={<TerminalSquare className="h-4 w-4" />}>
+          <div className="space-y-2">
+            {recentLogs.map(log => (
+              <React.Fragment key={log.id}>
+                <LogRow log={log} />
+              </React.Fragment>
+            ))}
+            {recentLogs.length === 0 && <EmptyLine>No recent logs.</EmptyLine>}
+          </div>
+        </Panel>
+      </div>
+
+      <Panel title="Operations" subtitle="Fast paths to common server work" icon={<Zap className="h-4 w-4" />}>
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          <QuickAction to="/console" icon={<TerminalSquare className="h-4 w-4" />} title="Open Console" description="Run RCON commands and inspect output." />
+          <QuickAction to="/players" icon={<Users className="h-4 w-4" />} title="Manage Players" description="Review online players, kicks, and bans." />
+          <QuickAction to="/resources" icon={<Server className="h-4 w-4" />} title="Control Resources" description="Start, stop, and restart scripts." />
+          <QuickAction to="/settings" icon={<FileCode2 className="h-4 w-4" />} title="Edit server.cfg" description="Update the active FiveM config file." />
+          <QuickAction to="/database" icon={<Database className="h-4 w-4" />} title="Explore Database" description="Inspect tables and run admin queries." />
+        </div>
+      </Panel>
+    </div>
+  );
+}
+
+function MetricCard({
+  icon,
+  label,
+  value,
+  detail,
+  tone,
+}: {
+  icon: ReactNode;
+  label: string;
+  value: string;
+  detail: string;
+  tone: 'blue' | 'orange' | 'violet' | 'green';
+}) {
+  const toneClass = {
+    blue: 'bg-blue-500/10 text-blue-400 border-blue-500/20',
+    orange: 'bg-orange-600/10 text-orange-500 border-orange-600/20',
+    violet: 'bg-violet-500/10 text-violet-400 border-violet-500/20',
+    green: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20',
+  }[tone];
+
+  return (
+    <section className="rounded-lg border border-zinc-800 bg-[#111] p-5">
+      <div className="flex items-center gap-4">
+        <div className={`flex h-11 w-11 items-center justify-center rounded-lg border ${toneClass}`}>
+          {icon}
+        </div>
+        <div className="min-w-0">
+          <div className="text-[10px] font-bold uppercase tracking-widest text-zinc-500">{label}</div>
+          <div className="mt-1 truncate text-2xl font-semibold text-white">{value}</div>
         </div>
       </div>
+      <div className="mt-4 text-xs text-zinc-500">{detail}</div>
+    </section>
+  );
+}
+
+function Panel({ title, subtitle, icon, children }: { title: string; subtitle: string; icon: ReactNode; children: ReactNode }) {
+  return (
+    <section className="rounded-lg border border-zinc-800 bg-[#111] p-5">
+      <div className="mb-5 flex items-start justify-between gap-4">
+        <div>
+          <h2 className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest text-zinc-400">
+            <span className="text-orange-500">{icon}</span>
+            {title}
+          </h2>
+          <p className="mt-1 text-xs text-zinc-600">{subtitle}</p>
+        </div>
+      </div>
+      {children}
+    </section>
+  );
+}
+
+function SmallStat({ label, value, tone }: { label: string; value: number | string; tone: string }) {
+  return (
+    <div className="rounded-lg border border-zinc-800 bg-zinc-950/60 p-3">
+      <div className={`text-xl font-semibold ${tone}`}>{value}</div>
+      <div className="mt-1 text-[10px] font-bold uppercase tracking-widest text-zinc-600">{label}</div>
+    </div>
+  );
+}
+
+function StatusRow({ label, value, active }: { label: string; value: string; active: boolean }) {
+  return (
+    <div className="flex items-center justify-between gap-3 rounded border border-zinc-800/70 bg-black/20 px-3 py-2">
+      <span className="truncate text-sm text-zinc-300">{label}</span>
+      <span className={`inline-flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider ${active ? 'text-emerald-400' : 'text-zinc-500'}`}>
+        <span className={`h-1.5 w-1.5 rounded-full ${active ? 'bg-emerald-400' : 'bg-zinc-600'}`} />
+        {value}
+      </span>
+    </div>
+  );
+}
+
+function PlayerRow({ player }: { player: Player }) {
+  return (
+    <div className="flex items-center justify-between gap-3 rounded border border-zinc-800/70 bg-black/20 px-3 py-2">
+      <div className="min-w-0">
+        <div className="truncate text-sm font-medium text-white">{player.name}</div>
+        <div className="text-[10px] uppercase tracking-wider text-zinc-600">{player.role || 'player'}</div>
+      </div>
+      <span className="font-mono text-xs text-zinc-400">{player.ping ?? 0}ms</span>
+    </div>
+  );
+}
+
+function LogRow({ log }: { log: LogEntry }) {
+  const color = log.level === 'ERROR'
+    ? 'text-red-400'
+    : log.level === 'WARN'
+      ? 'text-yellow-400'
+      : log.level === 'COMMAND'
+        ? 'text-violet-400'
+        : 'text-zinc-400';
+
+  return (
+    <div className="rounded border border-zinc-800/70 bg-black/20 px-3 py-2">
+      <div className="mb-1 flex items-center justify-between gap-3">
+        <span className={`text-[10px] font-bold uppercase tracking-wider ${color}`}>{log.level}</span>
+        <span className="font-mono text-[10px] text-zinc-600">{new Date(log.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+      </div>
+      <p className="line-clamp-1 text-xs text-zinc-400">{log.message}</p>
+    </div>
+  );
+}
+
+function QuickAction({ to, icon, title, description }: { to: string; icon: ReactNode; title: string; description: string }) {
+  return (
+    <Link
+      to={to}
+      className="group flex min-h-[104px] items-start justify-between gap-4 rounded-lg border border-zinc-800 bg-zinc-950/60 p-4 transition-colors hover:border-orange-600/30 hover:bg-orange-600/5"
+    >
+      <div className="min-w-0">
+        <div className="mb-3 flex h-8 w-8 items-center justify-center rounded border border-zinc-800 bg-black/30 text-zinc-400 group-hover:border-orange-600/30 group-hover:text-orange-500">
+          {icon}
+        </div>
+        <div className="text-sm font-semibold text-white">{title}</div>
+        <p className="mt-1 text-xs leading-relaxed text-zinc-500">{description}</p>
+      </div>
+      <ChevronRight className="mt-1 h-4 w-4 shrink-0 text-zinc-600 transition-transform group-hover:translate-x-1 group-hover:text-orange-500" />
+    </Link>
+  );
+}
+
+function EmptyLine({ children }: { children: ReactNode }) {
+  return (
+    <div className="rounded border border-dashed border-zinc-800 px-3 py-4 text-center text-xs text-zinc-600">
+      {children}
     </div>
   );
 }
