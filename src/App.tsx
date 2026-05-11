@@ -6,6 +6,7 @@ import { apiFetch } from './lib/api';
 
 // Pages
 import Login from './pages/Login';
+import Setup from './pages/Setup';
 import Dashboard from './pages/Dashboard';
 import Players from './pages/Players';
 import Console from './pages/Console';
@@ -24,16 +25,20 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
 }
 
 export default function App() {
-  const { isAuthenticated, logout } = useAuthStore();
+  const { isAuthenticated, login, logout, token } = useAuthStore();
 
   useEffect(() => {
     if (isAuthenticated) {
       // Verify token immediately
-      apiFetch('/auth/verify').catch(() => {
-        logout();
-      });
+      apiFetch('/auth/verify')
+        .then(({ user }) => {
+          if (token && user) login(token, user);
+        })
+        .catch(() => {
+          logout();
+        });
     }
-  }, [isAuthenticated, logout]);
+  }, [isAuthenticated, login, logout, token]);
 
   return (
     <>
@@ -41,6 +46,7 @@ export default function App() {
       <Router>
         <Routes>
           <Route path="/login" element={<Login />} />
+          <Route path="/setup" element={<Setup />} />
           <Route path="/" element={<ProtectedRoute><Layout /></ProtectedRoute>}>
             <Route index element={<Dashboard />} />
             <Route path="players" element={<Players />} />

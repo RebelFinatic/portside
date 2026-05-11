@@ -4,28 +4,48 @@ import { ShieldCheck, Plus, Trash2, Edit, Save, X, User, AlertTriangle, Loader2 
 import { toast } from 'sonner';
 
 const AVAILABLE_PERMISSIONS = [
-  'all',
-  'console.read',
+  'all_permissions',
+  'manage.admins',
+  'settings.view',
+  'settings.write',
+  'console.view',
   'console.write',
+  'control.server',
+  'announcement',
+  'commands.resources',
+  'server.cfg.editor',
+  'txadmin.log.view',
+  'server.log.view',
+  'players.direct_message',
+  'players.whitelist',
+  'players.warn',
   'players.kick',
   'players.ban',
-  'resources.start',
-  'resources.stop',
-  'resources.restart',
+  'players.freeze',
+  'players.heal',
+  'players.playermode',
+  'players.spectate',
+  'players.teleport',
+  'players.troll',
   'database.read',
-  'config.edit'
+  'database.write',
+  'database.admin',
 ];
 
 interface Role {
   id: string;
   name: string;
   permissions: string[];
+  isOwner?: boolean;
 }
 
 interface PlatformUser {
   id: string;
   username: string;
   roleId: string;
+  role?: string;
+  enabled?: boolean;
+  isOwner?: boolean;
 }
 
 export default function Roles() {
@@ -37,6 +57,8 @@ export default function Roles() {
   const [isCreating, setIsCreating] = useState(false);
   const [rolePendingDelete, setRolePendingDelete] = useState<Role | null>(null);
   const [deleteLoading, setDeleteLoading] = useState(false);
+  const [newAdmin, setNewAdmin] = useState({ username: '', password: '', roleId: '' });
+  const [adminLoading, setAdminLoading] = useState(false);
 
   useEffect(() => {
     fetchData();
@@ -79,7 +101,7 @@ export default function Roles() {
       setEditingRole(null);
       setIsCreating(false);
     } catch (err) {
-      toast.error('Failed to save role');
+      toast.error(err instanceof Error ? err.message : 'Failed to save role');
     }
   };
 
@@ -92,7 +114,7 @@ export default function Roles() {
       toast.success('Role deleted');
       setRolePendingDelete(null);
     } catch (err) {
-      toast.error('Failed to delete role');
+      toast.error(err instanceof Error ? err.message : 'Failed to delete role');
     } finally {
       setDeleteLoading(false);
     }
@@ -120,7 +142,25 @@ export default function Roles() {
       setUsers(prev => prev.map(u => u.id === userId ? { ...u, roleId: targetRoleId } : u));
       toast.success('User role updated');
     } catch (err) {
-      toast.error('Failed to update user role');
+      toast.error(err instanceof Error ? err.message : 'Failed to update user role');
+    }
+  };
+
+  const handleCreateAdmin = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setAdminLoading(true);
+    try {
+      const created = await apiFetch('/platform-users', {
+        method: 'POST',
+        body: JSON.stringify(newAdmin),
+      });
+      setUsers(prev => [...prev, created]);
+      setNewAdmin({ username: '', password: '', roleId: '' });
+      toast.success(`Admin ${created.username} created`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to create admin');
+    } finally {
+      setAdminLoading(false);
     }
   };
 
@@ -165,8 +205,10 @@ export default function Roles() {
                     </button>
                     <button 
                       onClick={() => setRolePendingDelete(role)}
+                      disabled={role.isOwner}
                       className="p-1.5 text-zinc-500 hover:text-red-500 bg-zinc-900 border border-zinc-800 rounded hover:bg-red-500/10 hover:border-red-500/30 transition-colors"
                       aria-label={`Delete ${role.name}`}
+                      title={role.isOwner ? 'Owner role cannot be deleted' : `Delete ${role.name}`}
                     >
                       <Trash2 className="w-3.5 h-3.5" />
                     </button>
@@ -192,6 +234,44 @@ export default function Roles() {
           <h2 className="text-sm font-bold text-zinc-300 uppercase tracking-widest flex items-center gap-2 mb-4">
             <User className="w-4 h-4 text-blue-500" /> Platform Users
           </h2>
+          <form onSubmit={handleCreateAdmin} className="mb-4 grid grid-cols-1 gap-3 rounded-xl border border-zinc-800 bg-[#111] p-4 lg:grid-cols-[1fr_1fr_1fr_auto]">
+            <input
+              type="text"
+              value={newAdmin.username}
+              onChange={(event) => setNewAdmin(prev => ({ ...prev, username: event.target.value }))}
+              className="bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-xs text-white placeholder-zinc-600 focus:outline-none focus:border-zinc-700"
+              placeholder="Username"
+              required
+            />
+            <input
+              type="password"
+              value={newAdmin.password}
+              onChange={(event) => setNewAdmin(prev => ({ ...prev, password: event.target.value }))}
+              className="bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-xs text-white placeholder-zinc-600 focus:outline-none focus:border-zinc-700"
+              placeholder="Password (10+ chars)"
+              minLength={10}
+              required
+            />
+            <select
+              value={newAdmin.roleId}
+              onChange={(event) => setNewAdmin(prev => ({ ...prev, roleId: event.target.value }))}
+              className="bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-zinc-700"
+              required
+            >
+              <option value="">Select role</option>
+              {roles.filter(role => !role.isOwner).map(role => (
+                <option key={role.id} value={role.id}>{role.name}</option>
+              ))}
+            </select>
+            <button
+              type="submit"
+              disabled={adminLoading}
+              className="inline-flex items-center justify-center gap-2 rounded-lg border border-blue-500/20 bg-blue-500/10 px-3 py-2 text-xs font-bold uppercase tracking-wider text-blue-400 transition-colors hover:bg-blue-500/20 disabled:opacity-50"
+            >
+              {adminLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
+              Add
+            </button>
+          </form>
           <div className="bg-[#111] border border-zinc-800 rounded-xl shadow-sm overflow-hidden">
             <table className="w-full text-left border-collapse">
               <thead>
@@ -208,6 +288,7 @@ export default function Roles() {
                       <select 
                         value={user.roleId}
                         onChange={(e) => handleAssignRole(user.id, e.target.value)}
+                        disabled={user.isOwner}
                         className="bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-zinc-700 w-full max-w-[200px]"
                       >
                         <option value="" disabled>Select Role</option>

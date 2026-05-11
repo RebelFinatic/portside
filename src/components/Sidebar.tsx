@@ -4,18 +4,20 @@ import { cn } from '../lib/utils';
 import { useAuthStore } from '../store/useAuthStore';
 
 const navigation = [
-  { name: 'Live Terminal', to: '/console', icon: TerminalSquare },
+  { name: 'Live Terminal', to: '/console', icon: TerminalSquare, permission: 'console.view' },
   { name: 'Players', to: '/players', icon: Users },
-  { name: 'Script Manager', to: '/resources', icon: FileCode2 },
-  { name: 'Role Management', to: '/roles', icon: ShieldCheck },
+  { name: 'Script Manager', to: '/resources', icon: FileCode2, permission: 'commands.resources' },
+  { name: 'Role Management', to: '/roles', icon: ShieldCheck, permission: 'manage.admins' },
 ];
 const infrastructure = [
   { name: 'Dashboard', to: '/', icon: LayoutDashboard },
-  { name: 'MariaDB Explorer', to: '/database', icon: Database },
+  { name: 'MariaDB Explorer', to: '/database', icon: Database, permission: 'database.read' },
 ];
 
 export default function Sidebar() {
-  const { user } = useAuthStore();
+  const { user, hasPermission } = useAuthStore();
+  const visibleNavigation = navigation.filter(item => !item.permission || hasPermission(item.permission));
+  const visibleInfrastructure = infrastructure.filter(item => !item.permission || hasPermission(item.permission));
   
   return (
     <aside className="w-64 bg-[#0d0d0d] border-r border-zinc-800/50 flex flex-col hidden md:flex shrink-0">
@@ -33,7 +35,7 @@ export default function Sidebar() {
 
       <nav className="flex-1 px-4 space-y-1">
         <div className="text-[10px] uppercase tracking-widest text-zinc-500 font-semibold mb-2 ml-2">Core Control</div>
-        {navigation.map((item) => (
+        {visibleNavigation.map((item) => (
           <NavLink
             key={item.name}
             to={item.to}
@@ -61,7 +63,7 @@ export default function Sidebar() {
         ))}
 
         <div className="pt-6 text-[10px] uppercase tracking-widest text-zinc-500 font-semibold mb-2 ml-2">Infrastructure</div>
-        {infrastructure.map((item) => (
+        {visibleInfrastructure.map((item) => (
           <NavLink
             key={item.name}
             to={item.to}
@@ -87,6 +89,7 @@ export default function Sidebar() {
             )}
           </NavLink>
         ))}
+        {hasPermission('server.cfg.editor') && (
         <NavLink
             to="/settings"
             className={({ isActive }) =>
@@ -110,6 +113,7 @@ export default function Sidebar() {
               </>
             )}
         </NavLink>
+        )}
       </nav>
       
       <div className="p-4 border-t border-zinc-800/50 bg-black/20">

@@ -28,3 +28,7 @@ export async function apiFetch(endpoint: string, options: RequestInit = {}) {
 
   return response.json();
 }
+
+export function hasPermission(permission: string) {
+  return useAuthStore.getState().hasPermission(permission);
+}

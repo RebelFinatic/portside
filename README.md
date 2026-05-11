@@ -17,19 +17,33 @@ Portside is an open-source operations panel for FiveM servers. It gives server o
 - React, TypeScript, Vite, and Tailwind CSS
 - Express server API
 - MySQL/MariaDB support via `mysql2`
-- JWT authentication
+- JWT-backed sessions
+- SQLite internal data store for Portside admins, roles, sessions, and audit logs
 - Password hashing with `bcrypt`
 
 ## Setup
 
 1. Install dependencies with `pnpm install`.
 2. Copy `.env.example` to `.env`.
-3. Configure database settings.
-4. Configure `FIVEM_SERVER_URL`.
-5. Generate a secure `JWT_SECRET`.
+3. Generate a secure `JWT_SECRET`.
+4. Configure `PORTSIDE_DATA_PATH` if you do not want Portside's internal SQLite database under `.portside/`.
+5. Configure `FIVEM_SERVER_URL`.
 6. Set `FIVEM_SERVER_CFG_PATH` to the absolute path of your FiveM `server.cfg`.
 7. To enable live commands, add `set rcon_password "a_strong_password"` in your FiveM `server.cfg`, then set the same value as `FIVEM_RCON_PASSWORD` in `.env`.
 8. Start development with `pnpm dev`.
+9. Open the panel and complete first-run setup to create the owner admin.
+
+## First-run Setup
+
+Portside no longer ships with a demo production login. On a fresh install, the panel redirects to first-run setup and creates an owner admin in Portside's internal SQLite database. The owner role receives `all_permissions` and cannot be deleted or demoted from the owner role.
+
+The internal database is stored at:
+
+```env
+PORTSIDE_DATA_PATH=".portside"
+```
+
+This database is for Portside's own admins, roles, sessions, auth attempts, and admin action logs. It is separate from the MySQL/MariaDB game database used by the Database Explorer.
 
 ## FiveM Integration
 
@@ -63,11 +77,15 @@ FiveM does not provide one universal vanilla ban command. If your framework expo
 
 ## Security
 
-- **JWT authentication** protects authenticated routes.
-- **Password hashing** uses `bcrypt`.
-- **Role-based permissions** limit access to server-altering actions.
+- **JWT-backed sessions** protect authenticated routes and can be revoked on logout.
+- **Password hashing** uses `bcrypt` for stored admin credentials.
+- **Role-based permissions** use txAdmin-compatible permission names such as `all_permissions`, `console.write`, `players.kick`, `players.ban`, `commands.resources`, `server.cfg.editor`, and `manage.admins`.
+- **Admin action logs** record successful sensitive actions and denied permission attempts.
 - **RCON credentials** enable live server commands and should be treated as production secrets.
 - **Environment variables** should be stored in `.env` and never committed.
+- **Debug mode** (`DEBUG=true` / `VITE_DEBUG=true`) bypasses real auth and grants all permissions. Use it only for local demos.
+
+Never commit `FIVEM_RCON_PASSWORD`, `JWT_SECRET`, database passwords, or future integration tokens. Keep RCON on localhost or a private network where possible.
 
 ## Contributing
 

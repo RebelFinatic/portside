@@ -1,16 +1,28 @@
-import React, { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import React, { useEffect, useState } from 'react';
+import { Link, useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
 import { User, Lock, Loader2 } from 'lucide-react';
 import { useAuthStore } from '../store/useAuthStore';
 import { apiFetch } from '../lib/api';
 
 export default function Login() {
-  const [username, setUsername] = useState('admin');
-  const [password, setPassword] = useState('portside');
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [setupRequired, setSetupRequired] = useState(false);
   const login = useAuthStore((state) => state.login);
   const navigate = useNavigate();
+
+  useEffect(() => {
+    apiFetch('/setup/status')
+      .then(data => {
+        if (data.setupRequired) {
+          setSetupRequired(true);
+          navigate('/setup');
+        }
+      })
+      .catch(() => {});
+  }, [navigate]);
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -25,7 +37,11 @@ export default function Login() {
       toast.success('Authentication successful');
       navigate('/');
     } catch (error: any) {
-      toast.error(error.message || 'Authentication failed');
+      if (error.message?.includes('setup')) {
+        navigate('/setup');
+      } else {
+        toast.error(error.message || 'Authentication failed');
+      }
     } finally {
       setIsLoading(false);
     }
@@ -90,10 +106,12 @@ export default function Login() {
             {isLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Authenticate'}
           </button>
         </form>
-        
-        <div className="mt-8 text-center text-[10px] font-mono text-zinc-600">
-          <p>DEMO: admin / portside</p>
-        </div>
+
+        {setupRequired && (
+          <div className="mt-6 text-center text-xs text-zinc-500">
+            First-run setup is required. <Link to="/setup" className="text-orange-500 hover:text-orange-400">Create the owner admin</Link>
+          </div>
+        )}
       </div>
     </div>
   );

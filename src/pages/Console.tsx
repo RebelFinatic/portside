@@ -156,8 +156,20 @@ export default function Console() {
 
   const fetchLogs = async () => {
     try {
-      const data = await apiFetch('/logs');
-      setLogs([...data].reverse());
+      const [runtimeLogs, actionLogs] = await Promise.all([
+        apiFetch('/logs'),
+        apiFetch('/admin-logs').catch(() => []),
+      ]);
+      const actionLogEntries = Array.isArray(actionLogs)
+        ? actionLogs.map((log: any) => ({
+          id: log.id,
+          timestamp: log.timestamp,
+          level: log.status === 'denied' ? 'WARN' : 'INFO',
+          source: 'admin',
+          message: `${log.actorUsername || 'system'} ${log.action}${log.permission ? ` (${log.permission})` : ''}`,
+        }))
+        : [];
+      setLogs([...runtimeLogs, ...actionLogEntries].sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()));
     } catch {
       // silent fail for polling
     }
