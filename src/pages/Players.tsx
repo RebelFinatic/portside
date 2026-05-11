@@ -1,218 +1,444 @@
-import React, { useState, useEffect } from 'react';
-import { Search, ShieldAlert, Zap, Loader2, Ban, X } from 'lucide-react';
-import { apiFetch } from '../lib/api';
+import React, { useEffect, useMemo, useState } from 'react';
+import { Ban, FileText, History, Loader2, MessageSquareWarning, Plus, RefreshCw, Search, ShieldAlert, StickyNote, X, Zap } from 'lucide-react';
+import { apiFetch, hasPermission } from '../lib/api';
 import { toast } from 'sonner';
 
+interface PlayerRow {
+  id?: string;
+  sourceId?: number | null;
+  displayName: string;
+  name?: string;
+  ping?: number | null;
+  online?: boolean;
+  identifiers: string[];
+  hwids?: string[];
+  actionCounts?: {
+    activeBans: number;
+    warnings: number;
+    kicks: number;
+  };
+}
+
+interface PlayerProfile extends PlayerRow {
+  recentNames: string[];
+  firstSeenAt: string;
+  lastSeenAt: string;
+  sessions: any[];
+  notes: any[];
+  actions: any[];
+}
+
+const defaultDurations = ['1h', '24h', '3d', '1w', 'permanent'];
+
 export default function Players() {
-  const [players, setPlayers] = useState<any[]>([]);
+  const [players, setPlayers] = useState<PlayerRow[]>([]);
+  const [onlineFallback, setOnlineFallback] = useState<PlayerRow[]>([]);
+  const [profile, setProfile] = useState<PlayerProfile | null>(null);
   const [loading, setLoading] = useState(true);
+  const [profileLoading, setProfileLoading] = useState(false);
   const [search, setSearch] = useState('');
-  
-  // Ban Modal State
-  const [banModalOpen, setBanModalOpen] = useState(false);
-  const [selectedPlayer, setSelectedPlayer] = useState<any>(null);
-  const [banReason, setBanReason] = useState('');
-  const [banDuration, setBanDuration] = useState('24h');
-  const [actionLoading, setActionLoading] = useState(false);
+  const [reason, setReason] = useState('');
+  const [duration, setDuration] = useState('24h');
+  const [note, setNote] = useState('');
+  const [actionLoading, setActionLoading] = useState('');
 
   useEffect(() => {
     fetchPlayers();
   }, []);
 
   const fetchPlayers = async () => {
+    setLoading(true);
     try {
-      const data = await apiFetch('/players');
-      setPlayers(data);
-    } catch (error) {
+      const [knownResult, onlineResult] = await Promise.allSettled([
+        apiFetch(`/moderation/players?query=${encodeURIComponent(search)}`),
+        apiFetch('/players'),
+      ]);
+
+      const known = knownResult.status === 'fulfilled' && Array.isArray(knownResult.value) ? knownResult.value : [];
+      const online = onlineResult.status === 'fulfilled' && Array.isArray(onlineResult.value) ? onlineResult.value : [];
+
+      setPlayers(known);
+      setOnlineFallback((Array.isArray(online) ? online : []).map((player: any) => ({
+        sourceId: player.id,
+        displayName: player.name,
+        name: player.name,
+        ping: player.ping,
+        online: true,
+        identifiers: player.identifiers || [],
+        hwids: player.hwids || [],
+      })));
+
+      if (knownResult.status === 'rejected' && onlineResult.status === 'rejected') {
+        toast.error('Failed to load players');
+      }
+    } catch {
       toast.error('Failed to load players');
     } finally {
       setLoading(false);
     }
   };
-  
-  const handleKick = async (id: number) => {
+
+  const openProfile = async (player: PlayerRow) => {
+    if (!player.id) return;
+    setProfileLoading(true);
     try {
-      await apiFetch(`/players/${id}/kick`, { method: 'POST' });
-      toast.success('Player kicked successfully');
-      setPlayers(prev => prev.filter(p => p.id !== id));
-    } catch (error) {
-      toast.error('Failed to kick player');
+      setProfile(await apiFetch(`/moderation/players/${player.id}`));
+      setReason('');
+      setNote('');
+      setDuration('24h');
+    } catch {
+      toast.error('Failed to load player profile');
+    } finally {
+      setProfileLoading(false);
     }
   };
 
-  const openBanModal = (player: any) => {
-    setSelectedPlayer(player);
-    setBanReason('');
-    setBanDuration('24h');
-    setBanModalOpen(true);
+  const refreshProfile = async () => {
+    if (!profile?.id) return;
+    setProfile(await apiFetch(`/moderation/players/${profile.id}`));
+    fetchPlayers();
   };
 
-  const handleBan = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!selectedPlayer) return;
-    setActionLoading(true);
+  const runLegacyKick = async (player: PlayerRow) => {
+    if (!player.sourceId) return;
+    setActionLoading(`kick-${player.sourceId}`);
     try {
-      await apiFetch(`/players/${selectedPlayer.id}/ban`, {
+      await apiFetch(`/players/${player.sourceId}/kick`, {
         method: 'POST',
-        body: JSON.stringify({ reason: banReason, duration: banDuration })
+        body: JSON.stringify({ reason: reason || 'Kicked by Portside' }),
       });
-      toast.success(`Player ${selectedPlayer.name} banned`);
-      setPlayers(prev => prev.filter(p => p.id !== selectedPlayer.id));
-      setBanModalOpen(false);
-    } catch (error) {
+      toast.success('Player kicked');
+      fetchPlayers();
+    } catch {
+      toast.error('Failed to kick player');
+    } finally {
+      setActionLoading('');
+    }
+  };
+
+  const createBan = async (player: PlayerRow) => {
+    setActionLoading('ban');
+    try {
+      if (player.id) {
+        await apiFetch(`/moderation/players/${player.id}/bans`, {
+          method: 'POST',
+          body: JSON.stringify({ reason: reason || 'Banned by Portside', duration }),
+        });
+      } else if (player.sourceId) {
+        await apiFetch(`/players/${player.sourceId}/ban`, {
+          method: 'POST',
+          body: JSON.stringify({ reason: reason || 'Banned by Portside', duration }),
+        });
+      }
+      toast.success('Ban recorded');
+      await refreshProfile();
+    } catch {
       toast.error('Failed to ban player');
     } finally {
-      setActionLoading(false);
+      setActionLoading('');
     }
   };
 
-  const filtered = players.filter(p => p.name.toLowerCase().includes(search.toLowerCase()));
+  const createWarning = async () => {
+    if (!profile?.id) return;
+    setActionLoading('warn');
+    try {
+      await apiFetch(`/moderation/players/${profile.id}/warnings`, {
+        method: 'POST',
+        body: JSON.stringify({ reason: reason || 'Warned by Portside' }),
+      });
+      toast.success('Warning recorded');
+      await refreshProfile();
+    } catch {
+      toast.error('Failed to warn player');
+    } finally {
+      setActionLoading('');
+    }
+  };
+
+  const createNote = async () => {
+    if (!profile?.id || !note.trim()) return;
+    setActionLoading('note');
+    try {
+      await apiFetch(`/moderation/players/${profile.id}/notes`, {
+        method: 'POST',
+        body: JSON.stringify({ note }),
+      });
+      toast.success('Note added');
+      setNote('');
+      await refreshProfile();
+    } catch {
+      toast.error('Failed to add note');
+    } finally {
+      setActionLoading('');
+    }
+  };
+
+  const revokeAction = async (actionId: string) => {
+    setActionLoading(`revoke-${actionId}`);
+    try {
+      await apiFetch(`/moderation/actions/${actionId}/revoke`, {
+        method: 'POST',
+        body: JSON.stringify({ reason: 'Revoked from Portside' }),
+      });
+      toast.success('Action revoked');
+      await refreshProfile();
+    } catch {
+      toast.error('Failed to revoke action');
+    } finally {
+      setActionLoading('');
+    }
+  };
+
+  const visiblePlayers = useMemo(() => {
+    const knownSourceIds = new Set(players.map(player => player.sourceId).filter(Boolean));
+    const fallback = onlineFallback.filter(player => !knownSourceIds.has(player.sourceId || null));
+    const combined = [...players, ...fallback];
+    const query = search.trim().toLowerCase();
+    if (!query) return combined;
+    return combined.filter(player => [
+      player.displayName,
+      String(player.sourceId || ''),
+      ...(player.identifiers || []),
+    ].join(' ').toLowerCase().includes(query));
+  }, [players, onlineFallback, search]);
 
   return (
     <div className="flex-1 flex flex-col w-full h-full p-6 lg:p-8">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-6 gap-4">
         <div>
-           <h1 className="text-2xl font-bold tracking-tight text-white m-0">Players</h1>
-           <p className="text-sm text-zinc-500 m-0">Ban, kick, and manage player roles.</p>
+          <h1 className="text-2xl font-bold tracking-tight text-white m-0">Players</h1>
+          <p className="text-sm text-zinc-500 m-0">Search known players, review history, and record moderation actions.</p>
         </div>
-        
-        <div className="relative">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-zinc-500" />
-          <input 
-            type="text" 
-            placeholder="Search players..."
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            className="pl-9 pr-4 py-2 w-full sm:w-64 bg-zinc-900 border border-zinc-800 rounded-lg text-sm text-white placeholder-zinc-500 focus:outline-none focus:ring-1 focus:ring-orange-500 focus:border-orange-500 transition-colors"
-          />
+
+        <div className="flex gap-2">
+          <div className="relative">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-zinc-500" />
+            <input
+              type="text"
+              placeholder="Search name, ID, identifier..."
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              onKeyDown={(event) => event.key === 'Enter' && fetchPlayers()}
+              className="pl-9 pr-4 py-2 w-full sm:w-72 bg-zinc-900 border border-zinc-800 rounded-lg text-sm text-white placeholder-zinc-500 focus:outline-none focus:ring-1 focus:ring-orange-500 focus:border-orange-500 transition-colors"
+            />
+          </div>
+          <button
+            onClick={fetchPlayers}
+            disabled={loading}
+            className="inline-flex items-center gap-2 rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm font-semibold text-white hover:border-zinc-700 disabled:opacity-60"
+          >
+            {loading ? <Loader2 className="h-4 w-4 animate-spin text-orange-500" /> : <RefreshCw className="h-4 w-4 text-zinc-400" />}
+            Refresh
+          </button>
         </div>
       </div>
 
       <div className="flex-1 flex flex-col bg-[#111] border border-zinc-800 rounded-xl overflow-hidden min-h-0">
-        {/* Table Header */}
-        <div className="grid grid-cols-[80px_1fr_1fr_120px_150px] px-6 py-3 border-b border-zinc-800 bg-zinc-900 shrink-0">
-          <div className="text-[10px] uppercase font-bold tracking-widest text-zinc-400">ID</div>
-          <div className="text-[10px] uppercase font-bold tracking-widest text-zinc-400">Name</div>
-          <div className="text-[10px] uppercase font-bold tracking-widest text-zinc-400">Identifiers</div>
-          <div className="text-[10px] uppercase font-bold tracking-widest text-zinc-400">Ping</div>
-          <div className="text-[10px] uppercase font-bold tracking-widest text-zinc-400 text-right">Actions</div>
+        <div className="hidden lg:grid grid-cols-[90px_1.2fr_1.4fr_120px_160px_150px] px-6 py-3 border-b border-zinc-800 bg-zinc-900 shrink-0">
+          <TableHead>ID</TableHead>
+          <TableHead>Name</TableHead>
+          <TableHead>Identifiers</TableHead>
+          <TableHead>Status</TableHead>
+          <TableHead>History</TableHead>
+          <TableHead align="text-right">Actions</TableHead>
         </div>
-        
-        {/* Table Body */}
+
         <div className="flex-1 overflow-y-auto">
           {loading ? (
-            <div className="p-12 text-center flex justify-center">
-              <Loader2 className="h-6 w-6 animate-spin text-orange-500" />
-            </div>
-          ) : filtered.length === 0 ? (
-            <div className="p-12 text-center text-zinc-500 text-sm">No players found.</div>
+            <div className="p-12 text-center flex justify-center"><Loader2 className="h-6 w-6 animate-spin text-orange-500" /></div>
+          ) : visiblePlayers.length === 0 ? (
+            <div className="p-12 text-center text-zinc-500 text-sm">No players found yet. The monitor resource will populate durable records as players connect.</div>
           ) : (
-            <div className="flex flex-col">
-              {filtered.map((player) => (
-                <div key={player.id} className="grid grid-cols-[80px_1fr_1fr_120px_150px] items-center px-6 py-4 data-grid-row group hover:bg-zinc-800/50">
-                  <div className="font-mono text-xs text-zinc-500">{player.id}</div>
+            visiblePlayers.map(player => (
+              <div key={player.id || `online-${player.sourceId}`} className="grid grid-cols-1 lg:grid-cols-[90px_1.2fr_1.4fr_120px_160px_150px] gap-3 lg:gap-4 items-center px-6 py-4 border-b border-zinc-800/70 hover:bg-zinc-800/40">
+                <div className="font-mono text-xs text-zinc-500">{player.sourceId ? `#${player.sourceId}` : 'offline'}</div>
+                <button onClick={() => openProfile(player)} disabled={!player.id} className="text-left min-w-0 disabled:cursor-default">
                   <div className="flex items-center gap-2">
-                    <span className="text-sm font-semibold text-white">{player.name}</span>
-                    {player.role === 'admin' || player.role === 'owner' ? (
-                      <ShieldAlert className="w-3.5 h-3.5 text-orange-500" />
-                    ) : null}
+                    <span className="truncate text-sm font-semibold text-white">{player.displayName || player.name}</span>
+                    {(player.actionCounts?.activeBans || 0) > 0 && <ShieldAlert className="w-3.5 h-3.5 text-red-400" />}
                   </div>
-                  <div className="font-mono text-[11px] text-zinc-500 truncate pr-4">
-                    {player.identifiers[0]}
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <span className={`w-1.5 h-1.5 rounded-full ${player.ping < 50 ? 'bg-green-500' : player.ping < 100 ? 'bg-yellow-500' : 'bg-red-500'}`}></span>
-                    <span className="font-mono text-[11px] text-zinc-400">{player.ping}ms</span>
-                  </div>
-                  <div className="flex justify-end gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                    <button onClick={() => handleKick(player.id)} className="p-1.5 text-zinc-400 hover:text-white hover:bg-zinc-700 rounded-md transition-colors" title="Kick Player">
-                      <Zap className="w-4 h-4" />
-                    </button>
-                    <button onClick={() => openBanModal(player)} className="p-1.5 text-zinc-400 hover:text-red-500 hover:bg-red-500/10 rounded-md transition-colors" title="Ban Player">
-                      <Ban className="w-4 h-4" />
-                    </button>
-                  </div>
+                  <div className="text-[10px] uppercase tracking-wider text-zinc-600">{player.id ? 'known player' : 'online only'}</div>
+                </button>
+                <div className="font-mono text-[11px] text-zinc-500 truncate">{player.identifiers?.[0] || 'no identifier captured'}</div>
+                <StatusBadge online={Boolean(player.online || player.sourceId)} ping={player.ping} />
+                <div className="flex gap-2 text-[10px] font-bold uppercase tracking-wider text-zinc-500">
+                  <span>{player.actionCounts?.activeBans || 0} bans</span>
+                  <span>{player.actionCounts?.warnings || 0} warns</span>
+                  <span>{player.actionCounts?.kicks || 0} kicks</span>
                 </div>
-              ))}
-            </div>
+                <div className="flex justify-end gap-1">
+                  {player.id && (
+                    <IconButton label="Profile" onClick={() => openProfile(player)} icon={<FileText className="w-4 h-4" />} />
+                  )}
+                  {hasPermission('players.kick') && player.sourceId && (
+                    <IconButton label="Kick" onClick={() => runLegacyKick(player)} icon={actionLoading === `kick-${player.sourceId}` ? <Loader2 className="w-4 h-4 animate-spin" /> : <Zap className="w-4 h-4" />} />
+                  )}
+                  {hasPermission('players.ban') && (
+                    <IconButton label="Ban" danger onClick={() => createBan(player)} icon={actionLoading === 'ban' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Ban className="w-4 h-4" />} />
+                  )}
+                </div>
+              </div>
+            ))
           )}
         </div>
       </div>
 
-      {/* Ban Modal */}
-      {banModalOpen && selectedPlayer && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in duration-200">
-          <div className="bg-[#111] border border-zinc-800 rounded-xl w-full max-w-md shadow-2xl flex flex-col shrink-0">
-            <div className="flex items-center justify-between p-4 border-b border-zinc-800">
-              <h2 className="text-lg font-bold text-white flex items-center gap-2">
-                <Ban className="w-5 h-5 text-red-500" />
-                Ban {selectedPlayer.name}
-              </h2>
-              <button 
-                onClick={() => setBanModalOpen(false)}
-                className="p-1 text-zinc-400 hover:text-white transition-colors"
-                disabled={actionLoading}
-              >
-                <X className="w-5 h-5" />
-              </button>
+      {(profile || profileLoading) && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm">
+          <div className="w-full max-w-5xl max-h-[88vh] overflow-hidden rounded-xl border border-zinc-800 bg-[#101010] shadow-2xl flex flex-col">
+            <div className="flex items-start justify-between gap-4 p-5 border-b border-zinc-800">
+              <div>
+                <h2 className="text-lg font-bold text-white">{profile?.displayName || 'Loading player...'}</h2>
+                <p className="mt-1 text-xs text-zinc-500 font-mono">{profile?.identifiers?.[0] || 'Loading identifiers'}</p>
+              </div>
+              <button onClick={() => setProfile(null)} className="p-1 text-zinc-500 hover:text-white"><X className="h-5 w-5" /></button>
             </div>
-            
-            <form onSubmit={handleBan} className="p-4 space-y-4">
-              <div>
-                <label className="block text-xs font-bold text-zinc-400 uppercase tracking-widest mb-2">
-                  Reason
-                </label>
-                <input
-                  type="text"
-                  required
-                  value={banReason}
-                  onChange={(e) => setBanReason(e.target.value)}
-                  className="w-full bg-black/40 border border-zinc-800 rounded-lg px-3 py-2.5 text-sm text-white placeholder-zinc-600 focus:outline-none focus:border-red-500 transition-colors"
-                  placeholder="e.g. Mass RDM"
-                  disabled={actionLoading}
-                />
-              </div>
 
-              <div>
-                <label className="block text-xs font-bold text-zinc-400 uppercase tracking-widest mb-2">
-                  Duration
-                </label>
-                <select
-                  value={banDuration}
-                  onChange={(e) => setBanDuration(e.target.value)}
-                  className="w-full bg-black/40 border border-zinc-800 rounded-lg px-3 py-2.5 text-sm text-white focus:outline-none focus:border-red-500 transition-colors appearance-none cursor-pointer"
-                  disabled={actionLoading}
-                >
-                  <option value="1h">1 Hour</option>
-                  <option value="24h">24 Hours</option>
-                  <option value="3d">3 Days</option>
-                  <option value="1w">1 Week</option>
-                  <option value="permanent">Permanent</option>
-                </select>
-              </div>
+            {profileLoading || !profile ? (
+              <div className="p-12 flex justify-center"><Loader2 className="h-6 w-6 animate-spin text-orange-500" /></div>
+            ) : (
+              <div className="grid grid-cols-1 xl:grid-cols-[1fr_360px] gap-0 overflow-y-auto">
+                <div className="p-5 space-y-5">
+                  <Section title="Identifiers" icon={<ShieldAlert className="h-4 w-4" />}>
+                    <CodeList items={[...profile.identifiers, ...(profile.hwids || []).map(value => `hwid:${value}`)]} />
+                  </Section>
 
-              <div className="flex justify-end gap-3 pt-4 border-t border-zinc-800/50 mt-6">
-                <button
-                  type="button"
-                  onClick={() => setBanModalOpen(false)}
-                  className="px-4 py-2 bg-transparent text-sm font-medium text-zinc-400 hover:text-white transition-colors"
-                  disabled={actionLoading}
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={actionLoading}
-                  className="flex items-center gap-2 px-4 py-2 bg-red-600/10 text-red-500 border border-red-600/30 rounded-lg text-sm font-bold tracking-wider uppercase hover:bg-red-600/20 transition-colors disabled:opacity-50"
-                >
-                  {actionLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Ban className="w-4 h-4" />}
-                  Confirm Ban
-                </button>
+                  <Section title="Moderation History" icon={<History className="h-4 w-4" />}>
+                    <div className="space-y-2">
+                      {profile.actions.length === 0 ? <EmptyText>No moderation history.</EmptyText> : profile.actions.map(action => (
+                        <div key={action.id} className="rounded-lg border border-zinc-800 bg-black/20 p-3">
+                          <div className="flex items-center justify-between gap-3">
+                            <div>
+                              <span className="text-xs font-bold uppercase tracking-wider text-orange-400">{action.type}</span>
+                              <p className="mt-1 text-sm text-zinc-300">{action.reason || 'No reason provided'}</p>
+                            </div>
+                            {action.type === 'ban' && !action.revokedAt && hasPermission('players.ban') && (
+                              <button onClick={() => revokeAction(action.id)} className="rounded border border-zinc-700 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-zinc-300 hover:text-white">
+                                Revoke
+                              </button>
+                            )}
+                          </div>
+                          <div className="mt-2 text-[10px] text-zinc-600">
+                            {action.authorUsername || 'system'} · {new Date(action.createdAt).toLocaleString()}
+                            {action.expiresAt ? ` · expires ${new Date(action.expiresAt).toLocaleString()}` : ''}
+                            {action.revokedAt ? ` · revoked ${new Date(action.revokedAt).toLocaleString()}` : ''}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </Section>
+
+                  <Section title="Sessions" icon={<History className="h-4 w-4" />}>
+                    <div className="space-y-2">
+                      {profile.sessions.length === 0 ? <EmptyText>No sessions recorded.</EmptyText> : profile.sessions.map(session => (
+                        <div key={session.id} className="rounded border border-zinc-800 bg-black/20 px-3 py-2 text-xs text-zinc-400">
+                          #{session.sourceId || 'offline'} · {new Date(session.joinedAt).toLocaleString()}
+                          {session.leftAt ? ` to ${new Date(session.leftAt).toLocaleString()}` : ' · active'}
+                          {session.dropReason ? ` · ${session.dropReason}` : ''}
+                        </div>
+                      ))}
+                    </div>
+                  </Section>
+                </div>
+
+                <aside className="border-t xl:border-t-0 xl:border-l border-zinc-800 p-5 space-y-5 bg-zinc-950/40">
+                  <Section title="Actions" icon={<Ban className="h-4 w-4" />}>
+                    <div className="space-y-3">
+                      <input value={reason} onChange={event => setReason(event.target.value)} placeholder="Reason" className="w-full rounded-lg border border-zinc-800 bg-black/40 px-3 py-2 text-sm text-white placeholder-zinc-600 focus:outline-none focus:border-orange-500" />
+                      <select value={duration} onChange={event => setDuration(event.target.value)} className="w-full rounded-lg border border-zinc-800 bg-black/40 px-3 py-2 text-sm text-white focus:outline-none focus:border-orange-500">
+                        {defaultDurations.map(item => <option key={item} value={item}>{item}</option>)}
+                      </select>
+                      <div className="grid grid-cols-2 gap-2">
+                        {hasPermission('players.ban') && <ActionButton onClick={() => createBan(profile)} loading={actionLoading === 'ban'} label="Ban" icon={<Ban className="h-4 w-4" />} />}
+                        {hasPermission('players.warn') && <ActionButton onClick={createWarning} loading={actionLoading === 'warn'} label="Warn" icon={<MessageSquareWarning className="h-4 w-4" />} />}
+                      </div>
+                    </div>
+                  </Section>
+
+                  <Section title="Notes" icon={<StickyNote className="h-4 w-4" />}>
+                    <div className="space-y-3">
+                      {profile.notes.map(item => (
+                        <div key={item.id} className="rounded border border-zinc-800 bg-black/30 p-3">
+                          <p className="text-sm text-zinc-300">{item.note}</p>
+                          <div className="mt-2 text-[10px] text-zinc-600">{item.authorUsername || 'system'} · {new Date(item.updatedAt).toLocaleString()}</div>
+                        </div>
+                      ))}
+                      {profile.notes.length === 0 && <EmptyText>No notes yet.</EmptyText>}
+                      {hasPermission('players.warn') && (
+                        <div className="space-y-2">
+                          <textarea value={note} onChange={event => setNote(event.target.value)} placeholder="Add staff note..." className="min-h-24 w-full rounded-lg border border-zinc-800 bg-black/40 px-3 py-2 text-sm text-white placeholder-zinc-600 focus:outline-none focus:border-orange-500" />
+                          <button onClick={createNote} disabled={!note.trim() || actionLoading === 'note'} className="inline-flex items-center gap-2 rounded-lg border border-orange-600/30 bg-orange-600/10 px-3 py-2 text-sm font-bold text-orange-400 hover:bg-orange-600/20 disabled:opacity-50">
+                            {actionLoading === 'note' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
+                            Add Note
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  </Section>
+                </aside>
               </div>
-            </form>
+            )}
           </div>
         </div>
       )}
     </div>
+  );
+}
+
+function TableHead({ children, align = 'text-left' }: { children: React.ReactNode; align?: string }) {
+  return <div className={`text-[10px] uppercase font-bold tracking-widest text-zinc-400 ${align}`}>{children}</div>;
+}
+
+function StatusBadge({ online, ping }: { online: boolean; ping?: number | null }) {
+  return (
+    <span className={`inline-flex w-fit items-center gap-1.5 rounded border px-2 py-1 text-[10px] font-bold uppercase tracking-wider ${online ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-400' : 'border-zinc-700 bg-zinc-900 text-zinc-500'}`}>
+      <span className={`h-1.5 w-1.5 rounded-full ${online ? 'bg-emerald-400' : 'bg-zinc-500'}`} />
+      {online ? `${ping ?? 0}ms` : 'offline'}
+    </span>
+  );
+}
+
+function IconButton({ label, icon, onClick, danger = false }: { label: string; icon: React.ReactNode; onClick: () => void; danger?: boolean }) {
+  return (
+    <button type="button" title={label} onClick={onClick} className={`p-1.5 rounded-md transition-colors ${danger ? 'text-zinc-400 hover:text-red-400 hover:bg-red-500/10' : 'text-zinc-400 hover:text-white hover:bg-zinc-700'}`}>
+      {icon}
+    </button>
+  );
+}
+
+function Section({ title, icon, children }: { title: string; icon: React.ReactNode; children: React.ReactNode }) {
+  return (
+    <section>
+      <h3 className="mb-3 flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest text-zinc-500">
+        <span className="text-orange-500">{icon}</span>
+        {title}
+      </h3>
+      {children}
+    </section>
+  );
+}
+
+function CodeList({ items }: { items: string[] }) {
+  if (!items.length) return <EmptyText>No identifiers captured.</EmptyText>;
+  return (
+    <div className="space-y-2">
+      {items.map(item => (
+        <div key={item} className="rounded border border-zinc-800 bg-black/30 px-3 py-2 font-mono text-xs text-zinc-400 break-all">{item}</div>
+      ))}
+    </div>
+  );
+}
+
+function EmptyText({ children }: { children: React.ReactNode }) {
+  return <div className="rounded border border-dashed border-zinc-800 px-3 py-4 text-center text-xs text-zinc-600">{children}</div>;
+}
+
+function ActionButton({ label, icon, loading, onClick }: { label: string; icon: React.ReactNode; loading: boolean; onClick: () => void }) {
+  return (
+    <button onClick={onClick} disabled={loading} className="inline-flex items-center justify-center gap-2 rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm font-bold text-white hover:border-zinc-700 disabled:opacity-50">
+      {loading ? <Loader2 className="h-4 w-4 animate-spin text-orange-500" /> : icon}
+      {label}
+    </button>
   );
 }

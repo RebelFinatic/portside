@@ -7,6 +7,8 @@ export const MONITOR_VERSION = '0.1.0';
 const allowedRelayEvents = new Set([
   'announcement',
   'playerKicked',
+  'playerBanned',
+  'playerWarned',
   'consoleCommand',
   'configChanged',
 ]);

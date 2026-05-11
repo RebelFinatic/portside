@@ -6,6 +6,7 @@ Portside is an open-source operations panel for FiveM servers. It gives server o
 
 - **Real-time analytics**: Monitor CPU, RAM, player counts, and server activity.
 - **Player management**: View online players, inspect identifiers, kick, ban, and manage staff workflows.
+- **Moderation history**: Store player records, sessions, bans, warnings, notes, and ban templates in Portside's internal database.
 - **Live console**: Read server output and execute console/RCON-style commands from the panel.
 - **Resource manager**: Start, stop, restart, search, and inspect FiveM resources.
 - **Portside monitor bridge**: Optional bundled FiveM resource reports stopped resources, manifest metadata, player snapshots, and txAdmin-compatible events.
@@ -46,7 +47,7 @@ The internal database is stored at:
 PORTSIDE_DATA_PATH=".portside"
 ```
 
-This database is for Portside's own admins, roles, sessions, auth attempts, and admin action logs. It is separate from the MySQL/MariaDB game database used by the Database Explorer.
+This database is for Portside's own admins, roles, sessions, auth attempts, admin action logs, player records, sessions, notes, ban templates, and moderation actions. It is separate from the MySQL/MariaDB game database used by the Database Explorer.
 
 ## FiveM Integration
 
@@ -72,7 +73,7 @@ FiveM does not provide one universal vanilla ban command. If your framework expo
 
 ### Portside Monitor Resource
 
-The optional `resources/portside_monitor` bridge closes gaps in FiveM's read-only JSON endpoints. It reports all resources, including stopped resources, resource paths, manifest metadata, player snapshots, and bridge events. Portside continues to work without it by falling back to FiveM JSON endpoints, RCON, or mock data in local demo mode.
+The optional `resources/portside_monitor` bridge closes gaps in FiveM's read-only JSON endpoints. It reports all resources, including stopped resources, resource paths, manifest metadata, player snapshots, player hardware tokens, and bridge events. Portside continues to work without it by falling back to FiveM JSON endpoints, RCON, or mock data in local demo mode.
 
 1. Copy `resources/portside_monitor` into your FXServer resources folder.
 2. Add these lines to `server.cfg`:
@@ -103,6 +104,20 @@ set portside_monitor_compat_txadmin_commands "true"
 ```
 
 The monitor uses `x-portside-monitor-token` for HTTP bridge authentication. Treat this token like a password: do not expose it to clients, log it, or commit it.
+
+### Moderation Database
+
+Portside keeps a self-contained player and moderation database in SQLite. The monitor resource feeds player identifiers, hardware tokens, and session snapshots into that database as players connect and disconnect.
+
+Current moderation features include:
+
+- Durable player profiles with identifiers, recent names, online source ID, session history, and last seen timestamps.
+- Internal bans with optional expiration, revocation, and txAdmin-compatible `playerBanned` event relay.
+- Join blocking for active Portside bans when the monitor resource is installed and `PORTSIDE_MONITOR_TOKEN` is configured.
+- Warnings, notes, and kick history written to moderation actions.
+- Ban templates for reusable ban reasons and durations.
+
+Framework ban commands are optional compatibility side effects for online bans. Portside's internal moderation records are the source of truth for join blocking. If the monitor cannot reach Portside during a join check, the resource allows the join to avoid accidentally locking out a live server.
 
 ## Scripts
 

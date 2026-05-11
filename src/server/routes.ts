@@ -13,6 +13,7 @@ import {
   writeServerConfig,
 } from './fivem';
 import { MONITOR_VERSION, createMonitorEventRelay, requireMonitorToken, safeEventName } from './monitor';
+import { cleanIdentifierList } from './moderation';
 import type { RealtimeHub } from './realtime';
 import {
   createAuthMiddleware,
@@ -108,6 +109,7 @@ export const registerApiRoutes = (app: Express, store: PortsideStore, logger: Me
         name: player.name,
         ping: Number(player.ping || 0),
         identifiers: Array.isArray(player.identifiers) ? player.identifiers.filter((identifier: unknown) => typeof identifier === 'string') : [],
+        hwids: Array.isArray(player.hwids) ? player.hwids.filter((hwid: unknown) => typeof hwid === 'string') : [],
         endpoint: typeof player.endpoint === 'string' ? player.endpoint : null,
         updatedAt: new Date().toISOString(),
       }));
@@ -116,6 +118,25 @@ export const registerApiRoutes = (app: Express, store: PortsideStore, logger: Me
     store.logMonitorEvent({ eventName: 'players.report', direction: 'inbound', status: 'success', payload: { count: stored.length } });
     realtime.broadcast('players', stored);
     res.json({ ok: true, players: stored.length });
+  });
+
+  app.post('/api/monitor/player/check-join', requireMonitorToken, (req, res) => {
+    const sourceId = Number.isFinite(Number(req.body?.sourceId)) ? Number(req.body.sourceId) : null;
+    const result = store.checkJoin({
+      sourceId,
+      name: typeof req.body?.name === 'string' ? req.body.name : 'Connecting Player',
+      identifiers: cleanIdentifierList(req.body?.identifiers),
+      hwids: cleanIdentifierList(req.body?.hwids),
+    });
+
+    store.logMonitorEvent({
+      eventName: 'player.checkJoin',
+      direction: 'inbound',
+      status: result.allow ? 'allowed' : 'denied',
+      payload: { sourceId, playerId: result.player.id, actionId: result.action?.id },
+    });
+
+    res.json(result.allow ? { allow: true } : { allow: false, reason: result.reason });
   });
 
   app.post('/api/monitor/events', requireMonitorToken, (req, res) => {
@@ -220,6 +241,7 @@ export const registerApiRoutes = (app: Express, store: PortsideStore, logger: Me
           name: player.name,
           ping: player.ping || 0,
           identifiers: player.identifiers || [],
+          hwids: player.hwids || [],
           role: 'player',
           source: 'monitor',
         })));
@@ -227,9 +249,9 @@ export const registerApiRoutes = (app: Express, store: PortsideStore, logger: Me
 
       if (!process.env.FIVEM_SERVER_URL) {
         return res.json([
-          { id: 1, name: 'thevindu', ping: 42, identifiers: ['steam:11000010abc1234'], role: 'owner' },
-          { id: 2, name: 'john_doe', ping: 120, identifiers: ['steam:1100001bcdef987'], role: 'player' },
-          { id: 4, name: 'gamer99', ping: 15, identifiers: ['steam:110000155555555'], role: 'admin' },
+          { id: 1, name: 'thevindu', ping: 42, identifiers: ['steam:11000010abc1234'], hwids: [], role: 'owner' },
+          { id: 2, name: 'john_doe', ping: 120, identifiers: ['steam:1100001bcdef987'], hwids: [], role: 'player' },
+          { id: 4, name: 'gamer99', ping: 15, identifiers: ['steam:110000155555555'], hwids: [], role: 'admin' },
         ]);
       }
 
@@ -239,6 +261,7 @@ export const registerApiRoutes = (app: Express, store: PortsideStore, logger: Me
         name: player.name,
         ping: player.ping || 0,
         identifiers: player.identifiers || [],
+        hwids: [],
         role: 'player',
       })));
     } catch (err: any) {
@@ -257,6 +280,17 @@ export const registerApiRoutes = (app: Express, store: PortsideStore, logger: Me
       if (!/^\d+$/.test(id)) return res.status(400).json({ error: 'Invalid player id' });
 
       await runRconCommand(`clientkick ${id} ${reason}`);
+      const player = store.getPlayerBySource(Number(id));
+      if (player) {
+        store.createModerationAction({
+          type: 'kick',
+          playerId: player.id,
+          reason,
+          authorAdminId: req.user?.id,
+          authorUsername: req.user?.username,
+          metadata: { sourceId: Number(id) },
+        });
+      }
       store.logAction({ ...actionActor(req), action: 'players.kick', method: req.method, route: req.originalUrl, permission: 'players.kick', status: 'success', details: { id, reason } });
       relayMonitorEvent('playerKicked', {
         target: Number(id),
@@ -277,18 +311,46 @@ export const registerApiRoutes = (app: Express, store: PortsideStore, logger: Me
 
       if (!/^\d+$/.test(id)) return res.status(400).json({ error: 'Invalid player id' });
 
-      if (!process.env.FIVEM_RCON_BAN_COMMAND) {
-        return res.status(501).json({ error: 'Ban command is not configured. Set FIVEM_RCON_BAN_COMMAND for your framework.' });
+      const player = store.getPlayerBySource(Number(id)) || store.upsertPlayerSnapshot({
+        sourceId: Number(id),
+        name: `Player ${id}`,
+        identifiers: [],
+        hwids: [],
+      });
+      const action = store.createModerationAction({
+        type: 'ban',
+        playerId: player.id,
+        reason: String(reason).trim(),
+        durationInput: String(duration).trim(),
+        authorAdminId: req.user?.id,
+        authorUsername: req.user?.username,
+        metadata: { sourceId: Number(id) },
+      });
+
+      if (process.env.FIVEM_RCON_BAN_COMMAND) {
+        const command = process.env.FIVEM_RCON_BAN_COMMAND
+          .replaceAll('{id}', id)
+          .replaceAll('{reason}', String(reason).trim())
+          .replaceAll('{duration}', String(duration).trim());
+        await runRconCommand(command);
+      } else {
+        await runRconCommand(`clientkick ${id} Banned: ${String(reason).trim()}`);
       }
 
-      const command = process.env.FIVEM_RCON_BAN_COMMAND
-        .replaceAll('{id}', id)
-        .replaceAll('{reason}', String(reason).trim())
-        .replaceAll('{duration}', String(duration).trim());
-
-      await runRconCommand(command);
-      store.logAction({ ...actionActor(req), action: 'players.ban', method: req.method, route: req.originalUrl, permission: 'players.ban', status: 'success', details: { id, reason, duration } });
-      res.json({ success: true, message: `Player ${id} banned successfully` });
+      relayMonitorEvent('playerBanned', {
+        author: req.user?.username || 'Portside',
+        reason: String(reason).trim(),
+        actionId: action.id,
+        expiration: action.expiresAt || false,
+        durationInput: String(duration).trim(),
+        targetNetId: Number(id),
+        targetIds: action.targetIdentifiers,
+        targetHwids: action.targetHwids,
+        targetName: action.targetName,
+        kickMessage: `Banned: ${String(reason).trim()}`,
+      });
+      store.logAction({ ...actionActor(req), action: 'players.ban', method: req.method, route: req.originalUrl, permission: 'players.ban', status: 'success', details: { id, reason, duration, actionId: action.id } });
+      res.json({ success: true, action });
     } catch (err: any) {
       res.status(502).json({ error: err.message || 'Failed to ban player' });
     }
@@ -319,6 +381,150 @@ export const registerApiRoutes = (app: Express, store: PortsideStore, logger: Me
     });
     store.logAction({ ...actionActor(req), action: 'announcement.send', method: req.method, route: req.originalUrl, permission: 'announcement', status: relayed ? 'success' : 'failed', details: { message } });
     res.json({ success: relayed });
+  });
+
+  app.get('/api/moderation/players', authenticateToken, (req, res) => {
+    res.json(store.searchPlayers(typeof req.query.query === 'string' ? req.query.query : ''));
+  });
+
+  app.get('/api/moderation/players/:id', authenticateToken, (req, res) => {
+    const profile = store.getPlayerProfile(req.params.id);
+    if (!profile) return res.status(404).json({ error: 'Player not found' });
+    res.json(profile);
+  });
+
+  app.post('/api/moderation/players/:id/bans', authenticateToken, requirePermission(store, 'players.ban'), async (req: AuthedRequest, res) => {
+    const player = store.getPlayer(req.params.id);
+    if (!player) return res.status(404).json({ error: 'Player not found' });
+    const reason = typeof req.body?.reason === 'string' && req.body.reason.trim() ? req.body.reason.trim() : 'Banned by Portside';
+    const duration = typeof req.body?.duration === 'string' ? req.body.duration.trim() : 'permanent';
+    const action = store.createModerationAction({
+      type: 'ban',
+      playerId: player.id,
+      reason,
+      durationInput: duration,
+      authorAdminId: req.user?.id,
+      authorUsername: req.user?.username,
+    });
+
+    if (player.lastSource !== null) {
+      try {
+        if (process.env.FIVEM_RCON_BAN_COMMAND) {
+          const command = process.env.FIVEM_RCON_BAN_COMMAND
+            .replaceAll('{id}', String(player.lastSource))
+            .replaceAll('{reason}', reason)
+            .replaceAll('{duration}', duration);
+          await runRconCommand(command);
+        } else {
+          await runRconCommand(`clientkick ${player.lastSource} Banned: ${reason}`);
+        }
+      } catch (error: any) {
+        logger.add('WARN', `Online ban side effect failed: ${error.message}`, 'moderation');
+      }
+    }
+
+    relayMonitorEvent('playerBanned', {
+      author: req.user?.username || 'Portside',
+      reason,
+      actionId: action.id,
+      expiration: action.expiresAt || false,
+      durationInput: duration,
+      targetNetId: player.lastSource,
+      targetIds: action.targetIdentifiers,
+      targetHwids: action.targetHwids,
+      targetName: player.displayName,
+      kickMessage: `Banned: ${reason}`,
+    });
+    store.logAction({ ...actionActor(req), action: 'moderation.ban', method: req.method, route: req.originalUrl, permission: 'players.ban', status: 'success', details: { playerId: player.id, actionId: action.id, duration } });
+    res.status(201).json(action);
+  });
+
+  app.post('/api/moderation/players/:id/warnings', authenticateToken, requirePermission(store, 'players.warn'), (req: AuthedRequest, res) => {
+    const player = store.getPlayer(req.params.id);
+    if (!player) return res.status(404).json({ error: 'Player not found' });
+    const reason = typeof req.body?.reason === 'string' && req.body.reason.trim() ? req.body.reason.trim() : 'Warned by Portside';
+    const action = store.createModerationAction({
+      type: 'warn',
+      playerId: player.id,
+      reason,
+      authorAdminId: req.user?.id,
+      authorUsername: req.user?.username,
+    });
+    relayMonitorEvent('playerWarned', {
+      author: req.user?.username || 'Portside',
+      reason,
+      actionId: action.id,
+      targetNetId: player.lastSource,
+      targetIds: action.targetIdentifiers,
+      targetName: player.displayName,
+    });
+    store.logAction({ ...actionActor(req), action: 'moderation.warn', method: req.method, route: req.originalUrl, permission: 'players.warn', status: 'success', details: { playerId: player.id, actionId: action.id } });
+    res.status(201).json(action);
+  });
+
+  app.post('/api/moderation/players/:id/notes', authenticateToken, requirePermission(store, 'players.warn'), (req: AuthedRequest, res) => {
+    const player = store.getPlayer(req.params.id);
+    if (!player) return res.status(404).json({ error: 'Player not found' });
+    const note = typeof req.body?.note === 'string' ? req.body.note.trim() : '';
+    if (!note) return res.status(400).json({ error: 'Note is required' });
+    const created = store.createPlayerNote(player.id, note, req.user?.id || null, req.user?.username || null);
+    store.logAction({ ...actionActor(req), action: 'moderation.note.create', method: req.method, route: req.originalUrl, permission: 'players.warn', status: 'success', details: { playerId: player.id, noteId: (created as any)?.id } });
+    res.status(201).json(created);
+  });
+
+  app.put('/api/moderation/notes/:id', authenticateToken, requirePermission(store, 'players.warn'), (req: AuthedRequest, res) => {
+    const note = typeof req.body?.note === 'string' ? req.body.note.trim() : '';
+    if (!note) return res.status(400).json({ error: 'Note is required' });
+    const updated = store.updatePlayerNote(req.params.id, note);
+    if (!updated) return res.status(404).json({ error: 'Note not found' });
+    store.logAction({ ...actionActor(req), action: 'moderation.note.update', method: req.method, route: req.originalUrl, permission: 'players.warn', status: 'success', details: { noteId: req.params.id } });
+    res.json(updated);
+  });
+
+  app.delete('/api/moderation/notes/:id', authenticateToken, requirePermission(store, 'players.warn'), (req: AuthedRequest, res) => {
+    const playerId = store.deletePlayerNote(req.params.id);
+    if (!playerId) return res.status(404).json({ error: 'Note not found' });
+    store.logAction({ ...actionActor(req), action: 'moderation.note.delete', method: req.method, route: req.originalUrl, permission: 'players.warn', status: 'success', details: { playerId, noteId: req.params.id } });
+    res.json({ success: true });
+  });
+
+  app.post('/api/moderation/actions/:id/revoke', authenticateToken, requirePermission(store, 'players.ban'), (req: AuthedRequest, res) => {
+    const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : '';
+    const action = store.revokeModerationAction(req.params.id, req.user?.id || null, req.user?.username || null, reason || null);
+    if (!action) return res.status(404).json({ error: 'Action not found' });
+    store.logAction({ ...actionActor(req), action: 'moderation.action.revoke', method: req.method, route: req.originalUrl, permission: 'players.ban', status: 'success', details: { actionId: req.params.id } });
+    res.json(action);
+  });
+
+  app.get('/api/moderation/ban-templates', authenticateToken, requirePermission(store, 'players.ban'), (_req, res) => {
+    res.json(store.listBanTemplates());
+  });
+
+  app.post('/api/moderation/ban-templates', authenticateToken, requirePermission(store, 'players.ban'), (req: AuthedRequest, res) => {
+    const name = typeof req.body?.name === 'string' ? req.body.name.trim() : '';
+    const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : '';
+    const duration = typeof req.body?.duration === 'string' ? req.body.duration.trim() : 'permanent';
+    if (!name || !reason) return res.status(400).json({ error: 'Name and reason are required' });
+    const template = store.createBanTemplate(name, reason, duration);
+    store.logAction({ ...actionActor(req), action: 'moderation.ban_template.create', method: req.method, route: req.originalUrl, permission: 'players.ban', status: 'success', details: { templateId: (template as any)?.id } });
+    res.status(201).json(template);
+  });
+
+  app.put('/api/moderation/ban-templates/:id', authenticateToken, requirePermission(store, 'players.ban'), (req: AuthedRequest, res) => {
+    const name = typeof req.body?.name === 'string' ? req.body.name.trim() : '';
+    const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : '';
+    const duration = typeof req.body?.duration === 'string' ? req.body.duration.trim() : 'permanent';
+    if (!name || !reason) return res.status(400).json({ error: 'Name and reason are required' });
+    const template = store.updateBanTemplate(req.params.id, name, reason, duration);
+    if (!template) return res.status(404).json({ error: 'Template not found' });
+    store.logAction({ ...actionActor(req), action: 'moderation.ban_template.update', method: req.method, route: req.originalUrl, permission: 'players.ban', status: 'success', details: { templateId: req.params.id } });
+    res.json(template);
+  });
+
+  app.delete('/api/moderation/ban-templates/:id', authenticateToken, requirePermission(store, 'players.ban'), (req: AuthedRequest, res) => {
+    if (!store.deleteBanTemplate(req.params.id)) return res.status(404).json({ error: 'Template not found' });
+    store.logAction({ ...actionActor(req), action: 'moderation.ban_template.delete', method: req.method, route: req.originalUrl, permission: 'players.ban', status: 'success', details: { templateId: req.params.id } });
+    res.json({ success: true });
   });
 
   app.post('/api/console/command', authenticateToken, requirePermission(store, 'console.write'), async (req: AuthedRequest, res) => {

@@ -1,6 +1,7 @@
 local VERSION = '0.1.0'
 local RESOURCE_NAME = GetCurrentResourceName()
 local debugMode = false
+local decodePayload
 
 local function trimTrailingSlash(value)
   return (value:gsub('/+$', ''))
@@ -106,11 +107,24 @@ local function collectPlayers()
       name = GetPlayerName(playerId) or ('Player ' .. playerId),
       ping = GetPlayerPing(playerId) or 0,
       identifiers = GetPlayerIdentifiers(playerId),
+      hwids = collectPlayerTokens(playerId),
       endpoint = GetPlayerEndpoint(playerId),
     }
   end
 
   return players
+end
+
+function collectPlayerTokens(playerId)
+  local tokens = {}
+  local count = GetNumPlayerTokens(playerId)
+  for index = 0, count - 1 do
+    local token = GetPlayerToken(playerId, index)
+    if token and token ~= '' then
+      tokens[#tokens + 1] = token
+    end
+  end
+  return tokens
 end
 
 local function sendHeartbeat()
@@ -144,7 +158,29 @@ local function reportEvent(eventName, payload)
   })
 end
 
-local function decodePayload(rawPayload)
+local function checkPlayerJoin(playerId, playerName, identifiers, hwids, callback)
+  postToPortside('/api/monitor/player/check-join', {
+    sourceId = tonumber(playerId),
+    name = playerName,
+    identifiers = identifiers,
+    hwids = hwids,
+  }, function(ok, statusCode, responseBody)
+    if not ok then
+      callback(true)
+      return
+    end
+
+    local decoded = decodePayload(responseBody)
+    if decoded.allow == false then
+      callback(false, decoded.reason or 'Connection refused by Portside.')
+      return
+    end
+
+    callback(true)
+  end)
+end
+
+decodePayload = function(rawPayload)
   if not rawPayload or rawPayload == '' then
     return {}
   end
@@ -248,6 +284,25 @@ end)
 
 AddEventHandler('playerJoining', function()
   SetTimeout(1000, reportPlayers)
+end)
+
+AddEventHandler('playerConnecting', function(playerName, _setKickReason, deferrals)
+  local playerId = source
+  deferrals.defer()
+  deferrals.update('Checking Portside moderation records...')
+
+  local identifiers = GetPlayerIdentifiers(playerId)
+  local hwids = collectPlayerTokens(playerId)
+
+  SetTimeout(0, function()
+    checkPlayerJoin(playerId, playerName or GetPlayerName(playerId) or 'Connecting Player', identifiers, hwids, function(allow, reason)
+      if allow then
+        deferrals.done()
+      else
+        deferrals.done(reason or 'Connection refused by Portside.')
+      end
+    end)
+  end)
 end)
 
 AddEventHandler('playerDropped', function(reason)
