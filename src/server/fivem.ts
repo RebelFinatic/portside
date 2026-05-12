@@ -86,9 +86,9 @@ export const sendRconCommand = (command: string) => new Promise<string>((resolve
 
 export const createRconRunner = (logger: MemoryLogger) => {
   return async (command: string) => {
-    logger.add('COMMAND', command, 'rcon');
+    logger.add('COMMAND', command, 'rcon', 'fxserver');
     const output = await sendRconCommand(command);
-    logger.add('INFO', output || `RCON command completed: ${command}`, 'rcon');
+    logger.add('INFO', output || `RCON command completed: ${command}`, 'rcon', 'fxserver');
     return output;
   };
 };

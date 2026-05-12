@@ -20,4 +20,5 @@ export interface MemoryLog {
   level: string;
   message: string;
   source: string;
+  family?: 'admin' | 'fxserver' | 'server';
 }

@@ -66,7 +66,7 @@ export const createMonitorEventRelay = (
       store.logMonitorEvent({ eventName, direction: 'outbound', status: 'success', payload });
       return true;
     } catch (error: any) {
-      logger.add('WARN', `Monitor event relay unavailable for ${eventName}: ${error.message}`, 'monitor');
+      logger.add('WARN', `Monitor event relay unavailable for ${eventName}: ${error.message}`, 'monitor', 'server');
       store.logMonitorEvent({ eventName, direction: 'outbound', status: 'failed', payload: { error: error.message } });
       return false;
     }

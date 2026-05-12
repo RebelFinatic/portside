@@ -150,6 +150,16 @@ export class PortsideStore {
         reason TEXT
       );
 
+      CREATE TABLE IF NOT EXISTS console_command_history (
+        id TEXT PRIMARY KEY,
+        timestamp TEXT NOT NULL,
+        admin_id TEXT,
+        username TEXT,
+        command TEXT NOT NULL,
+        status TEXT NOT NULL,
+        output TEXT
+      );
+
       CREATE TABLE IF NOT EXISTS monitor_heartbeat (
         id TEXT PRIMARY KEY CHECK (id = 'current'),
         timestamp TEXT NOT NULL,
@@ -504,6 +514,35 @@ export class PortsideStore {
       ...row,
       details: row.details ? JSON.parse(row.details) : null,
     }));
+  }
+
+  recordConsoleCommand(input: {
+    adminId?: string | null;
+    username?: string | null;
+    command: string;
+    status: string;
+    output?: string | null;
+  }) {
+    this.db.prepare(`
+      INSERT INTO console_command_history (id, timestamp, admin_id, username, command, status, output)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      crypto.randomUUID(),
+      now(),
+      input.adminId || null,
+      input.username || null,
+      input.command,
+      input.status,
+      input.output || null
+    );
+  }
+
+  recentConsoleCommands(adminId?: string | null, limit = 50) {
+    const sql = adminId
+      ? `SELECT id, timestamp, username, command, status, output FROM console_command_history WHERE admin_id = ? ORDER BY timestamp DESC LIMIT ?`
+      : `SELECT id, timestamp, username, command, status, output FROM console_command_history ORDER BY timestamp DESC LIMIT ?`;
+    const params = adminId ? [adminId, limit] : [limit];
+    return this.db.prepare(sql).all(...params);
   }
 
   upsertMonitorHeartbeat(input: {

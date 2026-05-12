@@ -1,4 +1,4 @@
-local VERSION = '0.1.1'
+local VERSION = '0.1.2'
 local RESOURCE_NAME = GetCurrentResourceName()
 local debugMode = false
 local decodePayload
@@ -158,6 +158,16 @@ local function reportEvent(eventName, payload)
   })
 end
 
+local function reportActivity(activityType, message, payload, level, source)
+  postToPortside('/api/monitor/activity', {
+    type = activityType,
+    level = level or 'INFO',
+    source = source or 'server',
+    message = message,
+    payload = payload or {},
+  })
+end
+
 local function checkPlayerJoin(playerId, playerName, identifiers, hwids, callback)
   postToPortside('/api/monitor/player/check-join', {
     sourceId = tonumber(playerId),
@@ -284,17 +294,25 @@ AddEventHandler('onResourceStart', function(resourceName)
     reportResources()
     reportPlayers()
   else
+    reportActivity('resource.start', ('Resource started: %s'):format(resourceName), { resource = resourceName }, 'INFO', 'resources')
     SetTimeout(1000, reportResources)
   end
 end)
 
 AddEventHandler('onResourceStop', function(resourceName)
   if resourceName ~= RESOURCE_NAME then
+    reportActivity('resource.stop', ('Resource stopped: %s'):format(resourceName), { resource = resourceName }, 'WARN', 'resources')
     SetTimeout(1000, reportResources)
   end
 end)
 
 AddEventHandler('playerJoining', function()
+  local playerId = source
+  reportActivity('player.join', ('%s joined the server'):format(GetPlayerName(playerId) or ('Player ' .. playerId)), {
+    id = tonumber(playerId),
+    name = GetPlayerName(playerId),
+    identifiers = GetPlayerIdentifiers(playerId),
+  }, 'INFO', 'players')
   SetTimeout(1000, reportPlayers)
 end)
 
@@ -319,12 +337,25 @@ end)
 
 AddEventHandler('playerDropped', function(reason)
   local playerId = source
+  reportActivity('player.leave', ('%s left the server: %s'):format(GetPlayerName(playerId) or ('Player ' .. playerId), reason or 'unknown'), {
+    id = tonumber(playerId),
+    name = GetPlayerName(playerId),
+    reason = reason,
+  }, 'INFO', 'players')
   reportEvent('playerDropped', {
     id = playerId,
     name = GetPlayerName(playerId),
     reason = reason,
   })
   SetTimeout(1000, reportPlayers)
+end)
+
+AddEventHandler('chatMessage', function(source, name, message)
+  reportActivity('chat', ('%s: %s'):format(name or ('Player ' .. source), message or ''), {
+    id = tonumber(source),
+    name = name,
+    message = message,
+  }, 'INFO', 'chat')
 end)
 
 RegisterNetEvent('portside_monitor:warningAcknowledged', function(actionId)

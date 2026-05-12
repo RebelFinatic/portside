@@ -8,6 +8,7 @@ Portside is an open-source operations panel for FiveM servers. It gives server o
 - **Player management**: View online players, inspect identifiers, kick, ban, and manage staff workflows.
 - **Moderation history**: Store player records, sessions, bans, warnings, direct messages, notes, and ban templates in Portside's internal database.
 - **Live console**: Read server output and execute console/RCON-style commands from the panel.
+- **Durable logs**: Persist admin, FXServer/RCON, and server activity logs under Portside's data path.
 - **Resource manager**: Start, stop, restart, search, and inspect FiveM resources.
 - **Portside monitor bridge**: Optional bundled FiveM resource reports stopped resources, manifest metadata, player snapshots, and txAdmin-compatible events.
 - **Configuration editor**: Edit the active FiveM `server.cfg` with basic syntax highlighting.
@@ -22,6 +23,7 @@ Portside is an open-source operations panel for FiveM servers. It gives server o
 - JWT-backed sessions
 - SQLite internal data store for Portside admins, roles, sessions, and audit logs
 - Optional FiveM monitor resource under `resources/portside_monitor`
+- Rotating file logs under `PORTSIDE_DATA_PATH/logs`
 - Password hashing with `bcrypt`
 
 ## Setup
@@ -73,7 +75,7 @@ FiveM does not provide one universal vanilla ban command. If your framework expo
 
 ### Portside Monitor Resource
 
-The optional `resources/portside_monitor` bridge closes gaps in FiveM's read-only JSON endpoints. It reports all resources, including stopped resources, resource paths, manifest metadata, player snapshots, player hardware tokens, in-game warning notifications, direct messages, and bridge events. Portside continues to work without it by falling back to FiveM JSON endpoints, RCON, or mock data in local demo mode.
+The optional `resources/portside_monitor` bridge closes gaps in FiveM's read-only JSON endpoints. It reports all resources, including stopped resources, resource paths, manifest metadata, player snapshots, player hardware tokens, in-game warning notifications, direct messages, server activity logs, and bridge events. Portside continues to work without it by falling back to FiveM JSON endpoints, RCON, or mock data in local demo mode.
 
 1. Copy `resources/portside_monitor` into your FXServer resources folder.
 2. Add these lines to `server.cfg`:
@@ -122,6 +124,18 @@ Current moderation features include:
 
 Framework ban commands are optional compatibility side effects for online bans. Portside's internal moderation records are the source of truth for join blocking. If the monitor cannot reach Portside during a join check, the resource allows the join to avoid accidentally locking out a live server.
 
+## Logs, Console, And Metrics
+
+Portside writes durable operational logs to `PORTSIDE_DATA_PATH/logs`:
+
+- `admin/`: Portside admin and authentication events, alongside structured SQLite admin action logs.
+- `fxserver/`: RCON commands, command output, and command failures. In external FiveM mode this is not full stdout/stderr; managed FXServer streaming will be added with process control.
+- `server/`: monitor-reported server activity such as joins, leaves, chat, and resource start/stop events.
+
+The Logs page can search recent entries and download daily log files. `PORTSIDE_LOG_RETENTION_DAYS` controls simple cleanup of old log files and defaults to 14 days.
+
+Dashboard CPU and memory values are sampled from the Portside Node process and host instead of generated demo numbers. The host status endpoint is available at `/host/status` and requires `PORTSIDE_HOST_API_TOKEN` or the compatibility alias `TXHOST_API_TOKEN` via `x-portside-envtoken`, `x-txadmin-envtoken`, or `?token=`.
+
 ## Scripts
 
 - `pnpm dev`: Run the local development server.
@@ -135,13 +149,13 @@ Framework ban commands are optional compatibility side effects for online bans. 
 - **JWT-backed sessions** protect authenticated routes and can be revoked on logout.
 - **Password hashing** uses `bcrypt` for stored admin credentials.
 - **Role-based permissions** use txAdmin-compatible permission names such as `all_permissions`, `console.write`, `players.kick`, `players.ban`, `commands.resources`, `server.cfg.editor`, and `manage.admins`.
-- **Admin action logs** record successful sensitive actions and denied permission attempts.
+- **Admin action logs** record successful sensitive actions and denied permission attempts, with durable log files for operational review.
 - **RCON credentials** enable live server commands and should be treated as production secrets.
 - **Monitor tokens** authenticate the FiveM resource bridge and should be treated as production secrets.
 - **Environment variables** should be stored in `.env` and never committed.
 - **Debug mode** (`DEBUG=true` / `VITE_DEBUG=true`) bypasses real auth and grants all permissions. Use it only for local demos.
 
-Never commit `FIVEM_RCON_PASSWORD`, `JWT_SECRET`, `PORTSIDE_MONITOR_TOKEN`, database passwords, or future integration tokens. Keep RCON and monitor bridge traffic on localhost or a private network where possible.
+Never commit `FIVEM_RCON_PASSWORD`, `JWT_SECRET`, `PORTSIDE_MONITOR_TOKEN`, `PORTSIDE_HOST_API_TOKEN`, database passwords, or future integration tokens. Keep RCON and monitor bridge traffic on localhost or a private network where possible.
 
 ## Contributing
 

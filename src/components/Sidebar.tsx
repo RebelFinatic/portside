@@ -1,5 +1,5 @@
 import { NavLink } from 'react-router-dom';
-import { LayoutDashboard, Users, TerminalSquare, Database, FileCode2, Settings, ShieldCheck } from 'lucide-react';
+import { LayoutDashboard, Users, TerminalSquare, Database, FileCode2, Settings, ShieldCheck, FileText } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { useAuthStore } from '../store/useAuthStore';
 
@@ -8,6 +8,7 @@ const navigation = [
   { name: 'Players', to: '/players', icon: Users },
   { name: 'Script Manager', to: '/resources', icon: FileCode2, permission: 'commands.resources' },
   { name: 'Role Management', to: '/roles', icon: ShieldCheck, permission: 'manage.admins' },
+  { name: 'Logs', to: '/logs', icon: FileText, permission: 'txadmin.log.view' },
 ];
 const infrastructure = [
   { name: 'Dashboard', to: '/', icon: LayoutDashboard },

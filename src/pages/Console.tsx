@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { Terminal, Copy, Command, Filter, Save, Bookmark } from 'lucide-react';
 import { apiFetch } from '../lib/api';
+import { useAuthStore } from '../store/useAuthStore';
 import { toast } from 'sonner';
 import { format } from 'date-fns';
 
@@ -126,6 +127,7 @@ export default function Console() {
   const [historyIndex, setHistoryIndex] = useState(-1);
   const [levelFilter, setLevelFilter] = useState('ALL');
   const [sourceFilter, setSourceFilter] = useState('ALL');
+  const token = useAuthStore(state => state.token);
   
   const [presets, setPresets] = useState<FilterPreset[]>([
     { name: 'Errors Only', level: 'ERROR', source: 'ALL' },
@@ -156,10 +158,14 @@ export default function Console() {
 
   const fetchLogs = async () => {
     try {
-      const [runtimeLogs, actionLogs] = await Promise.all([
-        apiFetch('/logs'),
+      const [runtimeLogs, actionLogs, history] = await Promise.all([
+        apiFetch('/logs?type=fxserver&limit=250'),
         apiFetch('/admin-logs').catch(() => []),
+        apiFetch('/console/history').catch(() => []),
       ]);
+      if (Array.isArray(history)) {
+        setCommandHistory([...history].reverse().map((item: any) => item.command).filter(Boolean));
+      }
       const actionLogEntries = Array.isArray(actionLogs)
         ? actionLogs.map((log: any) => ({
           id: log.id,
@@ -180,6 +186,25 @@ export default function Console() {
     const interval = setInterval(fetchLogs, 2000);
     return () => clearInterval(interval);
   }, []);
+
+  useEffect(() => {
+    if (!token) return;
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const socket = new WebSocket(`${protocol}//${window.location.host}/api/realtime?rooms=logs&token=${encodeURIComponent(token)}`);
+    socket.addEventListener('message', event => {
+      try {
+        const data = JSON.parse(event.data);
+        const payload = Array.isArray(data.payload) ? data.payload : [];
+        const fxLogs = payload.filter((log: any) => !log.family || log.family === 'fxserver');
+        if (fxLogs.length > 0) {
+          setLogs(prev => [...prev, ...fxLogs].slice(-500));
+        }
+      } catch {
+        // Ignore malformed realtime messages.
+      }
+    });
+    return () => socket.close();
+  }, [token]);
 
   useEffect(() => {
     endOfLogsRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -269,6 +294,14 @@ export default function Console() {
     }
   };
 
+  const copyVisibleLogs = async () => {
+    const text = filteredLogs
+      .map(log => `[${log.timestamp}] [${log.level}] [${log.source}] ${log.message}`)
+      .join('\n');
+    await navigator.clipboard.writeText(text);
+    toast.success('Copied visible logs');
+  };
+
   const getLevelColor = (level: string) => {
     switch (level) {
       case 'ERROR': return 'text-red-400';
@@ -286,7 +319,7 @@ export default function Console() {
             <h1 className="text-2xl font-bold tracking-tight text-white mb-1">Live Console</h1>
             <p className="text-sm text-zinc-500">Direct server standard output</p>
           </div>
-          <button className="flex items-center gap-2 px-3 py-1.5 rounded bg-zinc-800 border border-zinc-700 text-xs font-bold text-white transition-colors hover:bg-zinc-700">
+          <button onClick={copyVisibleLogs} className="flex items-center gap-2 px-3 py-1.5 rounded bg-zinc-800 border border-zinc-700 text-xs font-bold text-white transition-colors hover:bg-zinc-700">
             <Copy className="h-3 w-3" /> COPY
           </button>
         </div>

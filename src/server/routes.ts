@@ -1,10 +1,12 @@
 import type { Express, Response } from 'express';
+import path from 'path';
 import mysql from 'mysql2/promise';
 import bcrypt from 'bcryptjs';
 import { PERMISSIONS } from './permissions';
 import type { PortsideStore } from './store';
-import type { MemoryLogger } from './logging';
+import type { LogFamily, MemoryLogger } from './logging';
 import type { AuthedRequest } from './types';
+import { sampleRuntimeMetrics } from './metrics';
 import {
   assertSafeResourceName,
   createRconRunner,
@@ -44,6 +46,22 @@ const actionActor = (req: AuthedRequest) => ({
   actorUsername: req.user?.username,
   ip: req.ip,
 });
+
+const logFamily = (value: unknown): LogFamily | undefined => (
+  value === 'admin' || value === 'fxserver' || value === 'server' ? value : undefined
+);
+
+const hasPermissionName = (req: AuthedRequest, permission: string) => {
+  const permissions = req.user?.permissions || [];
+  return permissions.includes('all_permissions') || permissions.includes(permission);
+};
+
+const hasHostToken = (req: AuthedRequest) => {
+  const expected = process.env.PORTSIDE_HOST_API_TOKEN || process.env.TXHOST_API_TOKEN;
+  if (!expected) return false;
+  const supplied = req.header('x-portside-envtoken') || req.header('x-txadmin-envtoken') || (typeof req.query.token === 'string' ? req.query.token : '');
+  return supplied === expected;
+};
 
 export const registerApiRoutes = (app: Express, store: PortsideStore, logger: MemoryLogger, realtime: RealtimeHub) => {
   const authenticateToken = createAuthMiddleware(store);
@@ -90,12 +108,12 @@ export const registerApiRoutes = (app: Express, store: PortsideStore, logger: Me
         connectionLimit: 10,
         queueLimit: 0,
       });
-      logger.add('INFO', 'Database pool created successfully', 'database');
+      logger.add('INFO', 'Database pool created successfully', 'database', 'server');
     } else {
-      logger.add('WARN', 'Database credentials not provided, running in mock DB mode', 'database');
+      logger.add('WARN', 'Database credentials not provided, running in mock DB mode', 'database', 'server');
     }
   } catch (error: any) {
-    logger.add('ERROR', `Database connection failed: ${error.message}`, 'database');
+    logger.add('ERROR', `Database connection failed: ${error.message}`, 'database', 'server');
   }
 
   app.post('/api/monitor/heartbeat', requireMonitorToken, (req, res) => {
@@ -204,20 +222,38 @@ export const registerApiRoutes = (app: Express, store: PortsideStore, logger: Me
     res.json({ ok: true });
   });
 
+  app.post('/api/monitor/activity', requireMonitorToken, (req, res) => {
+    const type = typeof req.body?.type === 'string' ? req.body.type.trim() : 'activity';
+    const source = typeof req.body?.source === 'string' ? req.body.source.trim() : 'monitor';
+    const level = typeof req.body?.level === 'string' ? req.body.level.toUpperCase() : 'INFO';
+    const message = typeof req.body?.message === 'string' && req.body.message.trim()
+      ? req.body.message.trim()
+      : `${type} ${JSON.stringify(req.body?.payload ?? {})}`;
+    const log = logger.add(level, message, source, 'server');
+    store.logMonitorEvent({
+      eventName: `activity.${type}`,
+      direction: 'inbound',
+      status: 'success',
+      payload: req.body?.payload ?? req.body ?? null,
+    });
+    realtime.broadcast('logs', [log]);
+    res.json({ ok: true, log });
+  });
+
   app.get('/api/setup/status', (_req, res) => {
     res.json({ setupRequired: !store.hasOwner() });
   });
 
   app.post('/api/setup/admin', (req, res) => {
     createOwner(store, req, res).catch(error => {
-      logger.add('ERROR', `Setup error: ${error.message}`, 'auth');
+      logger.add('ERROR', `Setup error: ${error.message}`, 'auth', 'admin');
       res.status(500).json({ error: 'Failed to complete setup' });
     });
   });
 
   app.post('/api/auth/login', (req, res) => {
     login(store, req, res).catch(error => {
-      logger.add('ERROR', `Login error: ${error.message}`, 'auth');
+      logger.add('ERROR', `Login error: ${error.message}`, 'auth', 'admin');
       res.status(500).json({ error: 'Internal server error' });
     });
   });
@@ -234,6 +270,7 @@ export const registerApiRoutes = (app: Express, store: PortsideStore, logger: Me
 
   app.get('/api/server/status', authenticateToken, async (_req, res) => {
     try {
+      const metrics = sampleRuntimeMetrics();
       const monitorStatus = store.getMonitorStatus();
       let players = 0;
       let maxPlayers = 64;
@@ -260,7 +297,7 @@ export const registerApiRoutes = (app: Express, store: PortsideStore, logger: Me
             players = dyn.clients || 0;
           }
         } catch {
-          logger.add('WARN', `Could not connect to external FiveM server at ${process.env.FIVEM_SERVER_URL}`, 'system');
+          logger.add('WARN', `Could not connect to external FiveM server at ${process.env.FIVEM_SERVER_URL}`, 'system', 'server');
         }
       } else {
         online = true;
@@ -271,22 +308,40 @@ export const registerApiRoutes = (app: Express, store: PortsideStore, logger: Me
         online,
         players,
         maxPlayers,
-        cpuUsage: Math.floor(Math.random() * 40) + 10,
-        memoryUsage: Math.floor(Math.random() * 60) + 30,
-        uptime: '14h 22m',
+        cpuUsage: metrics.process.cpuUsage,
+        memoryUsage: metrics.process.memoryUsage,
+        uptime: metrics.process.uptime,
+        metrics,
         monitor: monitorStatus,
       });
     } catch (err: any) {
-      logger.add('ERROR', `Could not fetch server status: ${err.message}`, 'system');
+      logger.add('ERROR', `Could not fetch server status: ${err.message}`, 'system', 'server');
       res.status(500).json({ error: 'Failed to fetch status' });
     }
+  });
+
+  app.get('/host/status', (req: AuthedRequest, res) => {
+    if (!hasHostToken(req)) return res.status(401).json({ error: 'Invalid host status token' });
+    const status = store.getMonitorStatus() as any;
+    res.json({
+      ok: true,
+      generatedAt: new Date().toISOString(),
+      portside: sampleRuntimeMetrics(),
+      monitor: {
+        installed: status.installed,
+        online: status.online,
+        lastHeartbeatAt: status.lastHeartbeatAt,
+        resourceName: status.resourceName,
+        version: status.version,
+      },
+    });
   });
 
   app.get('/api/players', authenticateToken, async (_req, res) => {
     try {
       res.json(await listOnlinePlayers());
     } catch (err: any) {
-      logger.add('ERROR', `Could not fetch FiveM players: ${err.message}`, 'system');
+      logger.add('ERROR', `Could not fetch FiveM players: ${err.message}`, 'system', 'server');
       res.status(502).json({ error: 'Failed to fetch FiveM players' });
     }
   });
@@ -318,7 +373,7 @@ export const registerApiRoutes = (app: Express, store: PortsideStore, logger: Me
           });
           results.push({ sourceId, ok: true, actionId: action.id });
         } catch (error: any) {
-          logger.add('WARN', `Kick-all failed for ${sourceId}: ${error.message}`, 'moderation');
+          logger.add('WARN', `Kick-all failed for ${sourceId}: ${error.message}`, 'moderation', 'server');
           results.push({ sourceId, ok: false, error: error.message });
         }
       }
@@ -427,12 +482,57 @@ export const registerApiRoutes = (app: Express, store: PortsideStore, logger: Me
     }
   });
 
-  app.get('/api/logs', authenticateToken, requirePermission(store, 'txadmin.log.view'), (_req, res) => {
-    res.json(logger.recent());
+  app.get('/api/logs', authenticateToken, requirePermission(store, 'txadmin.log.view'), (req: AuthedRequest, res) => {
+    const family = logFamily(req.query.type);
+    if (family === 'server' && !hasPermissionName(req, 'server.log.view')) {
+      return res.status(403).json({ error: 'Missing permission server.log.view' });
+    }
+    const entries = logger.search({
+      family,
+      limit: Number(req.query.limit || 100),
+      query: typeof req.query.query === 'string' ? req.query.query : undefined,
+      level: typeof req.query.level === 'string' ? req.query.level : undefined,
+      source: typeof req.query.source === 'string' ? req.query.source : undefined,
+    });
+    if (family === 'admin') {
+      const actionEntries = store.recentActionLogs(Number(req.query.limit || 100)).map((log: any) => ({
+        id: log.id,
+        timestamp: log.timestamp,
+        level: log.status === 'denied' || log.status === 'failed' ? 'WARN' : 'INFO',
+        source: 'admin',
+        message: `${log.actorUsername || 'system'} ${log.action}${log.permission ? ` (${log.permission})` : ''}`,
+        family: 'admin',
+      }));
+      return res.json([...entries, ...actionEntries]
+        .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+        .slice(0, Number(req.query.limit || 100)));
+    }
+    res.json(!family && !hasPermissionName(req, 'server.log.view') ? entries.filter(entry => entry.family !== 'server') : entries);
   });
 
   app.get('/api/admin-logs', authenticateToken, requirePermission(store, 'txadmin.log.view'), (_req, res) => {
     res.json(store.recentActionLogs());
+  });
+
+  app.get('/api/logs/files', authenticateToken, requirePermission(store, 'txadmin.log.view'), (req: AuthedRequest, res) => {
+    const family = logFamily(req.query.type);
+    if (!family) return res.status(400).json({ error: 'Log type is required' });
+    if (family === 'server' && !hasPermissionName(req, 'server.log.view')) {
+      return res.status(403).json({ error: 'Missing permission server.log.view' });
+    }
+    res.json(logger.listFiles(family));
+  });
+
+  app.get('/api/logs/files/:type/:file/download', authenticateToken, requirePermission(store, 'txadmin.log.view'), (req: AuthedRequest, res) => {
+    const family = logFamily(req.params.type);
+    if (!family) return res.status(400).json({ error: 'Invalid log type' });
+    if (family === 'server' && !hasPermissionName(req, 'server.log.view')) {
+      return res.status(403).json({ error: 'Missing permission server.log.view' });
+    }
+    const file = path.basename(req.params.file);
+    const target = logger.resolveFile(family, file);
+    if (!target) return res.status(404).json({ error: 'Log file not found' });
+    res.download(target, file);
   });
 
   app.get('/api/monitor/status', authenticateToken, (_req, res) => {
@@ -495,7 +595,7 @@ export const registerApiRoutes = (app: Express, store: PortsideStore, logger: Me
           await runRconCommand(`clientkick ${player.lastSource} Banned: ${reason}`);
         }
       } catch (error: any) {
-        logger.add('WARN', `Online ban side effect failed: ${error.message}`, 'moderation');
+        logger.add('WARN', `Online ban side effect failed: ${error.message}`, 'moderation', 'server');
       }
     }
 
@@ -639,22 +739,30 @@ export const registerApiRoutes = (app: Express, store: PortsideStore, logger: Me
   });
 
   app.post('/api/console/command', authenticateToken, requirePermission(store, 'console.write'), async (req: AuthedRequest, res) => {
+    const command = typeof req.body?.command === 'string' ? req.body.command.trim() : '';
     try {
-      const { command } = req.body;
-      if (typeof command !== 'string' || !command.trim()) return res.status(400).json({ error: 'Command required' });
+      if (!command) return res.status(400).json({ error: 'Command required' });
 
-      const output = await runRconCommand(command.trim());
-      store.logAction({ ...actionActor(req), action: 'console.command', method: req.method, route: req.originalUrl, permission: 'console.write', status: 'success', details: { command: command.trim() } });
+      logger.add('COMMAND', `> ${command}`, req.user?.username || 'admin', 'fxserver');
+      const output = await runRconCommand(command);
+      logger.add('INFO', output || `RCON command completed: ${command}`, 'rcon', 'fxserver');
+      store.recordConsoleCommand({ adminId: req.user?.id, username: req.user?.username, command, status: 'success', output });
+      store.logAction({ ...actionActor(req), action: 'console.command', method: req.method, route: req.originalUrl, permission: 'console.write', status: 'success', details: { command } });
       relayMonitorEvent('consoleCommand', {
         author: req.user?.username || 'Portside',
-        command: command.trim(),
+        command,
       });
       realtime.broadcast('logs', logger.recent(20));
       res.json({ success: true, output });
     } catch (err: any) {
-      logger.add('ERROR', `RCON command failed: ${err.message}`, 'rcon');
+      logger.add('ERROR', `RCON command failed: ${err.message}`, 'rcon', 'fxserver');
+      if (command) store.recordConsoleCommand({ adminId: req.user?.id, username: req.user?.username, command, status: 'failed', output: err.message });
       res.status(502).json({ error: err.message || 'RCON command failed' });
     }
+  });
+
+  app.get('/api/console/history', authenticateToken, requirePermission(store, 'console.view'), (req: AuthedRequest, res) => {
+    res.json(store.recentConsoleCommands(req.user?.id, Number(req.query.limit || 50)));
   });
 
   app.get('/api/db/tables', authenticateToken, requirePermission(store, 'database.read'), async (_req, res) => {
@@ -669,7 +777,7 @@ export const registerApiRoutes = (app: Express, store: PortsideStore, logger: Me
       const [rows] = await dbPool.query('SHOW TABLES');
       res.json({ tables: (rows as any[]).map(row => Object.values(row)[0]) });
     } catch (err: any) {
-      logger.add('ERROR', `DB Query failed: ${err.message}`, 'database');
+      logger.add('ERROR', `DB Query failed: ${err.message}`, 'database', 'server');
       res.status(500).json({ error: 'Database error' });
     }
   });
@@ -680,7 +788,7 @@ export const registerApiRoutes = (app: Express, store: PortsideStore, logger: Me
 
     if (!dbPool) {
       if (process.env.DEBUG === 'true' || process.env.VITE_DEBUG === 'true') {
-        logger.add('INFO', `Mock Executed Query: ${query}`, 'database');
+        logger.add('INFO', `Mock Executed Query: ${query}`, 'database', 'server');
         store.logAction({ ...actionActor(req), action: 'database.query', method: req.method, route: req.originalUrl, permission: 'database.write', status: 'success', details: { mock: true } });
         return res.json({
           success: true,
@@ -695,7 +803,7 @@ export const registerApiRoutes = (app: Express, store: PortsideStore, logger: Me
     }
 
     try {
-      logger.add('INFO', `Executed Query: ${query}`, 'database');
+      logger.add('INFO', `Executed Query: ${query}`, 'database', 'server');
       const [rows, fields] = await dbPool.query(query);
       store.logAction({ ...actionActor(req), action: 'database.query', method: req.method, route: req.originalUrl, permission: 'database.write', status: 'success' });
       if (Array.isArray(rows)) {
@@ -704,7 +812,7 @@ export const registerApiRoutes = (app: Express, store: PortsideStore, logger: Me
         res.json({ success: true, affectedRows: (rows as any).affectedRows, message: 'Query executed successfully' });
       }
     } catch (err: any) {
-      logger.add('ERROR', `DB Query failed: ${err.message}`, 'database');
+      logger.add('ERROR', `DB Query failed: ${err.message}`, 'database', 'server');
       res.status(500).json({ error: err.message });
     }
   });
@@ -743,7 +851,7 @@ export const registerApiRoutes = (app: Express, store: PortsideStore, logger: Me
         logs: `${name}: reported by ${process.env.FIVEM_SERVER_URL}/info.json`,
       })));
     } catch (err: any) {
-      logger.add('ERROR', `Could not fetch FiveM resources: ${err.message}`, 'system');
+      logger.add('ERROR', `Could not fetch FiveM resources: ${err.message}`, 'system', 'server');
       res.status(502).json({ error: 'Failed to fetch FiveM resources' });
     }
   });
@@ -775,7 +883,7 @@ export const registerApiRoutes = (app: Express, store: PortsideStore, logger: Me
       res.json(await readServerConfig());
     } catch (err: any) {
       const status = err.code === 'ENOENT' ? 404 : err.message.includes('not configured') ? 503 : 500;
-      logger.add('ERROR', `Could not read server.cfg: ${err.message}`, 'system');
+      logger.add('ERROR', `Could not read server.cfg: ${err.message}`, 'system', 'server');
       res.status(status).json({ error: err.message || 'Failed to read server.cfg' });
     }
   });
@@ -789,7 +897,7 @@ export const registerApiRoutes = (app: Express, store: PortsideStore, logger: Me
 
     try {
       const configPath = await writeServerConfig(content);
-      logger.add('INFO', 'Configuration updated: server.cfg', 'system');
+      logger.add('INFO', 'Configuration updated: server.cfg', 'system', 'server');
       store.logAction({ ...actionActor(req), action: 'config.update', method: req.method, route: req.originalUrl, permission: 'server.cfg.editor', status: 'success', details: { file } });
       relayMonitorEvent('configChanged', {
         author: req.user?.username || 'Portside',
@@ -799,7 +907,7 @@ export const registerApiRoutes = (app: Express, store: PortsideStore, logger: Me
       res.json({ success: true, path: configPath });
     } catch (err: any) {
       const status = err.code === 'ENOENT' ? 404 : err.message.includes('not configured') ? 503 : 500;
-      logger.add('ERROR', `Could not write server.cfg: ${err.message}`, 'system');
+      logger.add('ERROR', `Could not write server.cfg: ${err.message}`, 'system', 'server');
       res.status(status).json({ error: err.message || 'Failed to write server.cfg' });
     }
   });

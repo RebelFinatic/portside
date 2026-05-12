@@ -39,6 +39,16 @@ interface ServerStatus {
   cpuUsage: number;
   memoryUsage: number;
   uptime: string;
+  metrics?: {
+    process?: {
+      memoryBytes?: number;
+      heapUsedBytes?: number;
+    };
+    host?: {
+      memoryUsage?: number;
+      cpuCount?: number;
+    };
+  };
 }
 
 interface Player {
@@ -202,14 +212,14 @@ export default function Dashboard() {
           icon={<Cpu className="h-5 w-5" />}
           label="CPU"
           value={`${status?.cpuUsage ?? 0}%`}
-          detail="reported by Portside"
+          detail={`${status?.metrics?.host?.cpuCount || 0} host threads sampled by Portside`}
           tone="orange"
         />
         <MetricCard
           icon={<HardDrive className="h-5 w-5" />}
           label="Memory"
           value={`${status?.memoryUsage ?? 0}%`}
-          detail="reported by Portside"
+          detail={`${Math.round((status?.metrics?.process?.memoryBytes || 0) / 1024 / 1024)} MB Portside RSS`}
           tone="violet"
         />
         <MetricCard

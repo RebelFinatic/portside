@@ -15,7 +15,8 @@ export async function startServer() {
   const realtime = new RealtimeHub();
 
   app.use(express.json());
-  logger.add('INFO', 'Portside Server starting...');
+  logger.cleanup();
+  logger.add('INFO', 'Portside Server starting...', 'system', 'server');
 
   registerApiRoutes(app, store, logger, realtime);
 
@@ -38,6 +39,6 @@ export async function startServer() {
 
   server.listen(PORT, '0.0.0.0', () => {
     console.log(`Portside running on http://localhost:${PORT}`);
-    logger.add('INFO', `Web panel ready on port ${PORT}`);
+    logger.add('INFO', `Web panel ready on port ${PORT}`, 'system', 'server');
   });
 }

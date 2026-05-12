@@ -14,6 +14,7 @@ import Resources from './pages/Resources';
 import Database from './pages/Database';
 import Configuration from './pages/Configuration';
 import Roles from './pages/Roles';
+import Logs from './pages/Logs';
 import Layout from './components/Layout';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
@@ -55,6 +56,7 @@ export default function App() {
             <Route path="database" element={<Database />} />
             <Route path="settings" element={<Configuration />} />
             <Route path="roles" element={<Roles />} />
+            <Route path="logs" element={<Logs />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Route>
         </Routes>
