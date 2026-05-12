@@ -33,6 +33,12 @@ const mockResources = [
   { name: 'vMenu', state: 'started', version: '3.5.0', author: 'Vesura', description: 'Server sidemenu for players and admins.', dependencies: [], logs: 'vMenu: Permissions loaded.' },
 ];
 
+const mockPlayers = [
+  { id: 1, name: 'thevindu', ping: 42, identifiers: ['steam:11000010abc1234'], hwids: [], role: 'owner' },
+  { id: 2, name: 'john_doe', ping: 120, identifiers: ['steam:1100001bcdef987'], hwids: [], role: 'player' },
+  { id: 4, name: 'gamer99', ping: 15, identifiers: ['steam:110000155555555'], hwids: [], role: 'admin' },
+];
+
 const actionActor = (req: AuthedRequest) => ({
   actorAdminId: req.user?.id,
   actorUsername: req.user?.username,
@@ -43,6 +49,34 @@ export const registerApiRoutes = (app: Express, store: PortsideStore, logger: Me
   const authenticateToken = createAuthMiddleware(store);
   const runRconCommand = createRconRunner(logger);
   const relayMonitorEvent = createMonitorEventRelay(store, logger, runRconCommand);
+
+  const listOnlinePlayers = async () => {
+    const monitorStatus = store.getMonitorStatus();
+    const monitorPlayers = store.listMonitorPlayers();
+    if (monitorStatus.online && monitorPlayers.length > 0) {
+      return monitorPlayers.map(player => ({
+        id: player.id,
+        name: player.name,
+        ping: player.ping || 0,
+        identifiers: player.identifiers || [],
+        hwids: player.hwids || [],
+        role: 'player',
+        source: 'monitor',
+      }));
+    }
+
+    if (!process.env.FIVEM_SERVER_URL) return mockPlayers;
+
+    const players = await fetchFiveMJson('/players.json');
+    return players.map((player: any) => ({
+      id: player.id,
+      name: player.name,
+      ping: player.ping || 0,
+      identifiers: player.identifiers || [],
+      hwids: [],
+      role: 'player',
+    }));
+  };
 
   let dbPool: mysql.Pool | null = null;
   try {
@@ -139,6 +173,23 @@ export const registerApiRoutes = (app: Express, store: PortsideStore, logger: Me
     res.json(result.allow ? { allow: true } : { allow: false, reason: result.reason });
   });
 
+  app.post('/api/monitor/warnings/:id/ack', requireMonitorToken, (req, res) => {
+    const sourceId = Number.isFinite(Number(req.body?.sourceId)) ? Number(req.body.sourceId) : null;
+    const action = store.acknowledgeWarning(req.params.id, sourceId, {
+      playerName: typeof req.body?.playerName === 'string' ? req.body.playerName : null,
+      resourceName: typeof req.body?.resourceName === 'string' ? req.body.resourceName : null,
+    });
+    if (!action) return res.status(404).json({ error: 'Warning not found' });
+
+    store.logMonitorEvent({
+      eventName: 'player.warningAcknowledged',
+      direction: 'inbound',
+      status: 'success',
+      payload: { actionId: action.id, sourceId },
+    });
+    res.json({ ok: true, action });
+  });
+
   app.post('/api/monitor/events', requireMonitorToken, (req, res) => {
     const eventName = typeof req.body?.eventName === 'string' ? req.body.eventName : '';
     if (!safeEventName(eventName)) return res.status(400).json({ error: 'Invalid event name' });
@@ -233,40 +284,55 @@ export const registerApiRoutes = (app: Express, store: PortsideStore, logger: Me
 
   app.get('/api/players', authenticateToken, async (_req, res) => {
     try {
-      const monitorStatus = store.getMonitorStatus();
-      const monitorPlayers = store.listMonitorPlayers();
-      if (monitorStatus.online && monitorPlayers.length > 0) {
-        return res.json(monitorPlayers.map(player => ({
-          id: player.id,
-          name: player.name,
-          ping: player.ping || 0,
-          identifiers: player.identifiers || [],
-          hwids: player.hwids || [],
-          role: 'player',
-          source: 'monitor',
-        })));
-      }
-
-      if (!process.env.FIVEM_SERVER_URL) {
-        return res.json([
-          { id: 1, name: 'thevindu', ping: 42, identifiers: ['steam:11000010abc1234'], hwids: [], role: 'owner' },
-          { id: 2, name: 'john_doe', ping: 120, identifiers: ['steam:1100001bcdef987'], hwids: [], role: 'player' },
-          { id: 4, name: 'gamer99', ping: 15, identifiers: ['steam:110000155555555'], hwids: [], role: 'admin' },
-        ]);
-      }
-
-      const players = await fetchFiveMJson('/players.json');
-      res.json(players.map((player: any) => ({
-        id: player.id,
-        name: player.name,
-        ping: player.ping || 0,
-        identifiers: player.identifiers || [],
-        hwids: [],
-        role: 'player',
-      })));
+      res.json(await listOnlinePlayers());
     } catch (err: any) {
       logger.add('ERROR', `Could not fetch FiveM players: ${err.message}`, 'system');
       res.status(502).json({ error: 'Failed to fetch FiveM players' });
+    }
+  });
+
+  app.post('/api/players/kick-all', authenticateToken, requirePermission(store, 'players.kick'), async (req: AuthedRequest, res) => {
+    const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : '';
+    if (!reason) return res.status(400).json({ error: 'Kick-all reason is required' });
+
+    try {
+      const players = (await listOnlinePlayers()).filter((player: any) => Number.isFinite(Number(player.id)));
+      const results = [];
+      for (const onlinePlayer of players) {
+        const sourceId = Number(onlinePlayer.id);
+        try {
+          await runRconCommand(`clientkick ${sourceId} ${reason}`);
+          const player = store.getPlayerBySource(sourceId) || store.upsertPlayerSnapshot({
+            sourceId,
+            name: onlinePlayer.name || `Player ${sourceId}`,
+            identifiers: onlinePlayer.identifiers || [],
+            hwids: onlinePlayer.hwids || [],
+          });
+          const action = store.createModerationAction({
+            type: 'kick',
+            playerId: player.id,
+            reason,
+            authorAdminId: req.user?.id,
+            authorUsername: req.user?.username,
+            metadata: { sourceId, batch: 'kick-all' },
+          });
+          results.push({ sourceId, ok: true, actionId: action.id });
+        } catch (error: any) {
+          logger.add('WARN', `Kick-all failed for ${sourceId}: ${error.message}`, 'moderation');
+          results.push({ sourceId, ok: false, error: error.message });
+        }
+      }
+
+      relayMonitorEvent('playerKicked', {
+        target: -1,
+        author: req.user?.username || 'Portside',
+        reason,
+        dropMessage: reason,
+      });
+      store.logAction({ ...actionActor(req), action: 'players.kick_all', method: req.method, route: req.originalUrl, permission: 'players.kick', status: results.some(result => result.ok) ? 'success' : 'failed', details: { reason, results } });
+      res.json({ success: results.some(result => result.ok), results });
+    } catch (err: any) {
+      res.status(502).json({ error: err.message || 'Failed to kick all players' });
     }
   });
 
@@ -317,6 +383,11 @@ export const registerApiRoutes = (app: Express, store: PortsideStore, logger: Me
         identifiers: [],
         hwids: [],
       });
+      const activeBan = store.getActiveBanForPlayer(player.id);
+      if (activeBan) {
+        return res.status(409).json({ error: 'Player already has an active ban', action: activeBan });
+      }
+
       const action = store.createModerationAction({
         type: 'ban',
         playerId: player.id,
@@ -396,6 +467,11 @@ export const registerApiRoutes = (app: Express, store: PortsideStore, logger: Me
   app.post('/api/moderation/players/:id/bans', authenticateToken, requirePermission(store, 'players.ban'), async (req: AuthedRequest, res) => {
     const player = store.getPlayer(req.params.id);
     if (!player) return res.status(404).json({ error: 'Player not found' });
+    const activeBan = store.getActiveBanForPlayer(player.id);
+    if (activeBan) {
+      return res.status(409).json({ error: 'Player already has an active ban', action: activeBan });
+    }
+
     const reason = typeof req.body?.reason === 'string' && req.body.reason.trim() ? req.body.reason.trim() : 'Banned by Portside';
     const duration = typeof req.body?.duration === 'string' ? req.body.duration.trim() : 'permanent';
     const action = store.createModerationAction({
@@ -442,6 +518,9 @@ export const registerApiRoutes = (app: Express, store: PortsideStore, logger: Me
   app.post('/api/moderation/players/:id/warnings', authenticateToken, requirePermission(store, 'players.warn'), (req: AuthedRequest, res) => {
     const player = store.getPlayer(req.params.id);
     if (!player) return res.status(404).json({ error: 'Player not found' });
+    const profile = store.getPlayerProfile(player.id);
+    if (!profile?.sourceId) return res.status(409).json({ error: 'Player must be online to receive a warning' });
+
     const reason = typeof req.body?.reason === 'string' && req.body.reason.trim() ? req.body.reason.trim() : 'Warned by Portside';
     const action = store.createModerationAction({
       type: 'warn',
@@ -454,12 +533,44 @@ export const registerApiRoutes = (app: Express, store: PortsideStore, logger: Me
       author: req.user?.username || 'Portside',
       reason,
       actionId: action.id,
-      targetNetId: player.lastSource,
+      targetNetId: profile.sourceId,
       targetIds: action.targetIdentifiers,
+      targetHwids: action.targetHwids,
       targetName: player.displayName,
     });
     store.logAction({ ...actionActor(req), action: 'moderation.warn', method: req.method, route: req.originalUrl, permission: 'players.warn', status: 'success', details: { playerId: player.id, actionId: action.id } });
     res.status(201).json(action);
+  });
+
+  app.post('/api/moderation/players/:id/direct-message', authenticateToken, requirePermission(store, 'players.direct_message'), async (req: AuthedRequest, res) => {
+    const player = store.getPlayer(req.params.id);
+    if (!player) return res.status(404).json({ error: 'Player not found' });
+    const profile = store.getPlayerProfile(player.id);
+    if (!profile?.sourceId) return res.status(409).json({ error: 'Player must be online to receive a direct message' });
+
+    const message = typeof req.body?.message === 'string' ? req.body.message.trim() : '';
+    if (!message) return res.status(400).json({ error: 'Message is required' });
+
+    const action = store.createModerationAction({
+      type: 'dm',
+      playerId: player.id,
+      reason: message,
+      authorAdminId: req.user?.id,
+      authorUsername: req.user?.username,
+      metadata: { sourceId: profile.sourceId },
+    });
+
+    const relayed = await relayMonitorEvent('playerDirectMessage', {
+      target: profile.sourceId,
+      author: req.user?.username || 'Portside',
+      message,
+      actionId: action.id,
+      targetIds: action.targetIdentifiers,
+      targetName: player.displayName,
+    });
+
+    store.logAction({ ...actionActor(req), action: 'moderation.direct_message', method: req.method, route: req.originalUrl, permission: 'players.direct_message', status: 'success', details: { playerId: player.id, actionId: action.id, delivered: relayed } });
+    res.status(201).json({ ...action, delivered: relayed });
   });
 
   app.post('/api/moderation/players/:id/notes', authenticateToken, requirePermission(store, 'players.warn'), (req: AuthedRequest, res) => {

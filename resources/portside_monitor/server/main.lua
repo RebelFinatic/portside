@@ -1,4 +1,4 @@
-local VERSION = '0.1.0'
+local VERSION = '0.1.1'
 local RESOURCE_NAME = GetCurrentResourceName()
 local debugMode = false
 local decodePayload
@@ -216,6 +216,18 @@ local function relayTxAdminEvent(source, args)
       multiline = true,
       args = { payload.author or 'Portside', payload.message },
     })
+  elseif eventName == 'playerWarned' and payload.targetNetId and payload.actionId then
+    TriggerClientEvent('portside_monitor:showWarning', tonumber(payload.targetNetId), {
+      actionId = payload.actionId,
+      author = payload.author or 'Portside',
+      reason = payload.reason or 'No reason provided',
+    })
+  elseif eventName == 'playerDirectMessage' and payload.target and payload.message then
+    TriggerClientEvent('chat:addMessage', tonumber(payload.target), {
+      color = { 255, 142, 72 },
+      multiline = true,
+      args = { payload.author or 'Portside', payload.message },
+    })
   end
 end
 
@@ -313,6 +325,19 @@ AddEventHandler('playerDropped', function(reason)
     reason = reason,
   })
   SetTimeout(1000, reportPlayers)
+end)
+
+RegisterNetEvent('portside_monitor:warningAcknowledged', function(actionId)
+  local playerId = source
+  if not actionId or actionId == '' then
+    return
+  end
+
+  postToPortside('/api/monitor/warnings/' .. actionId .. '/ack', {
+    sourceId = tonumber(playerId),
+    playerName = GetPlayerName(playerId),
+    resourceName = RESOURCE_NAME,
+  })
 end)
 
 CreateThread(function()

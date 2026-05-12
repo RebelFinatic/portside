@@ -2,13 +2,14 @@ import type { Request, Response, NextFunction } from 'express';
 import type { MemoryLogger } from './logging';
 import type { PortsideStore } from './store';
 
-export const MONITOR_VERSION = '0.1.0';
+export const MONITOR_VERSION = '0.1.1';
 
 const allowedRelayEvents = new Set([
   'announcement',
   'playerKicked',
   'playerBanned',
   'playerWarned',
+  'playerDirectMessage',
   'consoleCommand',
   'configChanged',
 ]);
@@ -49,6 +50,16 @@ export const createMonitorEventRelay = (
     }
 
     const encodedPayload = JSON.stringify(payload);
+    const status = store.getMonitorStatus();
+    if (!status.configured || !status.online) {
+      store.logMonitorEvent({
+        eventName,
+        direction: 'outbound',
+        status: 'skipped',
+        payload: { reason: status.configured ? 'monitor offline' : 'monitor bridge not configured' },
+      });
+      return false;
+    }
 
     try {
       await runRconCommand(`psaEvent ${eventName} ${encodedPayload}`);

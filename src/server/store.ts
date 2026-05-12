@@ -234,6 +234,9 @@ export class PortsideStore {
         revoked_by_admin_id TEXT,
         revoked_by_username TEXT,
         revocation_reason TEXT,
+        acknowledged_at TEXT,
+        acknowledged_by_source INTEGER,
+        acknowledgement_metadata TEXT,
         metadata TEXT,
         FOREIGN KEY (player_id) REFERENCES players(id) ON DELETE SET NULL
       );
@@ -263,6 +266,17 @@ export class PortsideStore {
     const monitorColumns = this.db.prepare('PRAGMA table_info(monitor_players)').all() as { name: string }[];
     if (!monitorColumns.some(column => column.name === 'hwids')) {
       this.db.prepare('ALTER TABLE monitor_players ADD COLUMN hwids TEXT').run();
+    }
+
+    const moderationColumns = this.db.prepare('PRAGMA table_info(moderation_actions)').all() as { name: string }[];
+    if (!moderationColumns.some(column => column.name === 'acknowledged_at')) {
+      this.db.prepare('ALTER TABLE moderation_actions ADD COLUMN acknowledged_at TEXT').run();
+    }
+    if (!moderationColumns.some(column => column.name === 'acknowledged_by_source')) {
+      this.db.prepare('ALTER TABLE moderation_actions ADD COLUMN acknowledged_by_source INTEGER').run();
+    }
+    if (!moderationColumns.some(column => column.name === 'acknowledgement_metadata')) {
+      this.db.prepare('ALTER TABLE moderation_actions ADD COLUMN acknowledgement_metadata TEXT').run();
     }
   }
 
@@ -941,6 +955,9 @@ export class PortsideStore {
       revokedByAdminId: row.revoked_by_admin_id,
       revokedByUsername: row.revoked_by_username,
       revocationReason: row.revocation_reason,
+      acknowledgedAt: row.acknowledged_at,
+      acknowledgedBySource: row.acknowledged_by_source,
+      acknowledgementMetadata: row.acknowledgement_metadata ? JSON.parse(row.acknowledgement_metadata) : null,
       metadata: row.metadata ? JSON.parse(row.metadata) : null,
     };
   }
@@ -951,6 +968,20 @@ export class PortsideStore {
       WHERE player_id = ?
       ORDER BY created_at DESC
     `).all(playerId).map(row => this.mapAction(row));
+  }
+
+  getActiveBanForPlayer(playerId: string) {
+    const row = this.db.prepare(`
+      SELECT * FROM moderation_actions
+      WHERE player_id = ?
+        AND type = 'ban'
+        AND revoked_at IS NULL
+        AND (expires_at IS NULL OR expires_at > ?)
+      ORDER BY created_at DESC
+      LIMIT 1
+    `).get(playerId, now()) as any;
+
+    return row ? this.mapAction(row) : null;
   }
 
   createModerationAction(input: {
@@ -1008,6 +1039,23 @@ export class PortsideStore {
       SET revoked_at = ?, revoked_by_admin_id = ?, revoked_by_username = ?, revocation_reason = ?
       WHERE id = ? AND revoked_at IS NULL
     `).run(now(), actorAdminId, actorUsername, reason, id);
+    return this.getModerationAction(id);
+  }
+
+  acknowledgeWarning(id: string, sourceId: number | null, metadata?: unknown) {
+    const warning = this.db.prepare("SELECT id FROM moderation_actions WHERE id = ? AND type = 'warn'").get(id);
+    if (!warning) return null;
+
+    this.db.prepare(`
+      UPDATE moderation_actions
+      SET acknowledged_at = ?, acknowledged_by_source = ?, acknowledgement_metadata = ?
+      WHERE id = ? AND type = 'warn' AND acknowledged_at IS NULL
+    `).run(
+      now(),
+      sourceId,
+      metadata === undefined ? null : JSON.stringify(metadata),
+      id
+    );
     return this.getModerationAction(id);
   }
 
