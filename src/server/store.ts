@@ -26,6 +26,7 @@ export interface AdminRecord {
   roleId: string;
   role: string;
   permissions: string[];
+  identifiers: string[];
   enabled: boolean;
   isOwner: boolean;
 }
@@ -172,6 +173,14 @@ export class PortsideStore {
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         FOREIGN KEY (role_id) REFERENCES roles(id)
+      );
+
+      CREATE TABLE IF NOT EXISTS admin_identifiers (
+        admin_id TEXT NOT NULL,
+        identifier TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (admin_id, identifier),
+        FOREIGN KEY (admin_id) REFERENCES admins(id) ON DELETE CASCADE
       );
 
       CREATE TABLE IF NOT EXISTS sessions (
@@ -470,6 +479,7 @@ export class PortsideStore {
       roleId: row.roleId,
       role: row.role,
       permissions,
+      identifiers: this.getAdminIdentifiers(row.id),
       enabled: Boolean(row.enabled),
       isOwner: Boolean(row.isOwner),
     };
@@ -500,6 +510,39 @@ export class PortsideStore {
   getRolePermissions(roleId: string) {
     const rows = this.db.prepare('SELECT permission FROM role_permissions WHERE role_id = ? ORDER BY permission').all(roleId) as { permission: string }[];
     return rows.map(row => row.permission);
+  }
+
+  getAdminIdentifiers(adminId: string) {
+    const rows = this.db.prepare('SELECT identifier FROM admin_identifiers WHERE admin_id = ? ORDER BY identifier').all(adminId) as { identifier: string }[];
+    return rows.map(row => row.identifier);
+  }
+
+  setAdminIdentifiers(adminId: string, identifiers: string[]) {
+    const admin = this.getAdminById(adminId);
+    if (!admin) return null;
+    const normalized = cleanIdentifierList(identifiers).map(identifier => identifier.toLowerCase());
+    const timestamp = now();
+    const update = this.db.transaction(() => {
+      this.db.prepare('DELETE FROM admin_identifiers WHERE admin_id = ?').run(adminId);
+      const insert = this.db.prepare('INSERT INTO admin_identifiers (admin_id, identifier, created_at) VALUES (?, ?, ?)');
+      normalized.forEach(identifier => insert.run(adminId, identifier, timestamp));
+    });
+    update();
+    return this.listAdmins().find(nextAdmin => nextAdmin.id === adminId) || null;
+  }
+
+  findAdminByIdentifiers(identifiers: string[]) {
+    const normalized = cleanIdentifierList(identifiers).map(identifier => identifier.toLowerCase());
+    if (!normalized.length) return null;
+    const placeholders = normalized.map(() => '?').join(',');
+    const row = this.db.prepare(`
+      SELECT admins.id
+      FROM admin_identifiers
+      JOIN admins ON admins.id = admin_identifiers.admin_id
+      WHERE admins.enabled = 1 AND lower(admin_identifiers.identifier) IN (${placeholders})
+      LIMIT 1
+    `).get(...normalized) as { id: string } | undefined;
+    return row ? this.getAdminById(row.id) : null;
   }
 
   listRoles(): RoleRecord[] {
@@ -562,6 +605,7 @@ export class PortsideStore {
       username: row.username,
       roleId: row.roleId,
       role: row.role,
+      identifiers: this.getAdminIdentifiers(row.id),
       enabled: Boolean(row.enabled),
       isOwner: Boolean(row.isOwner),
     }));

@@ -4,9 +4,34 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link rel="stylesheet" href="style.css">
-    <title>Portside Warning</title>
+    <title>Portside Monitor</title>
   </head>
   <body>
+    <main id="menu" class="menu hidden">
+      <section class="menu-shell">
+        <header class="menu-header">
+          <div>
+            <p class="eyebrow">Portside Admin</p>
+            <h1 id="menu-title">Admin Menu</h1>
+          </div>
+          <button id="close-menu" class="icon-button" type="button">Close</button>
+        </header>
+        <div id="menu-status" class="menu-status"></div>
+        <div class="menu-grid">
+          <section class="player-list">
+            <h2>Players</h2>
+            <div id="players"></div>
+          </section>
+          <section class="action-list">
+            <h2 id="selected-player">Select a player</h2>
+            <textarea id="action-reason" placeholder="Reason or message"></textarea>
+            <input id="action-duration" type="text" value="24h" placeholder="Ban duration">
+            <div id="actions" class="actions"></div>
+          </section>
+        </div>
+      </section>
+    </main>
+
     <main id="warning" class="warning hidden">
       <section class="panel">
         <p class="eyebrow">Staff Warning</p>

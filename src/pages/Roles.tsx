@@ -16,6 +16,9 @@ const AVAILABLE_PERMISSIONS = [
   'server.cfg.editor',
   'txadmin.log.view',
   'server.log.view',
+  'menu.vehicle',
+  'menu.clear_area',
+  'menu.viewids',
   'players.direct_message',
   'players.whitelist',
   'players.warn',
@@ -44,6 +47,7 @@ interface PlatformUser {
   username: string;
   roleId: string;
   role?: string;
+  identifiers?: string[];
   enabled?: boolean;
   isOwner?: boolean;
 }
@@ -58,6 +62,7 @@ export default function Roles() {
   const [rolePendingDelete, setRolePendingDelete] = useState<Role | null>(null);
   const [deleteLoading, setDeleteLoading] = useState(false);
   const [newAdmin, setNewAdmin] = useState({ username: '', password: '', roleId: '' });
+  const [identifierDrafts, setIdentifierDrafts] = useState<Record<string, string>>({});
   const [adminLoading, setAdminLoading] = useState(false);
 
   useEffect(() => {
@@ -73,6 +78,7 @@ export default function Roles() {
       ]);
       setRoles(rolesData);
       setUsers(usersData);
+      setIdentifierDrafts(Object.fromEntries(usersData.map((user: PlatformUser) => [user.id, (user.identifiers || []).join('\n')])));
     } catch (err) {
       toast.error('Failed to load roles and users');
     } finally {
@@ -143,6 +149,24 @@ export default function Roles() {
       toast.success('User role updated');
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Failed to update user role');
+    }
+  };
+
+  const handleSaveIdentifiers = async (userId: string) => {
+    try {
+      const identifiers = (identifierDrafts[userId] || '')
+        .split(/\r?\n|,/)
+        .map(identifier => identifier.trim())
+        .filter(Boolean);
+      const updated = await apiFetch(`/platform-users/${userId}/identifiers`, {
+        method: 'PUT',
+        body: JSON.stringify({ identifiers }),
+      });
+      setUsers(prev => prev.map(user => user.id === userId ? updated : user));
+      setIdentifierDrafts(prev => ({ ...prev, [userId]: (updated.identifiers || []).join('\n') }));
+      toast.success('Admin identifiers updated');
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to update identifiers');
     }
   };
 
@@ -278,6 +302,7 @@ export default function Roles() {
                 <tr className="bg-zinc-900 border-b border-zinc-800">
                   <th className="p-4 py-3 text-[10px] font-bold uppercase tracking-widest text-zinc-500">Username</th>
                   <th className="p-4 py-3 text-[10px] font-bold uppercase tracking-widest text-zinc-500">Assigned Role</th>
+                  <th className="p-4 py-3 text-[10px] font-bold uppercase tracking-widest text-zinc-500">FiveM Identifiers</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-zinc-800/50">
@@ -296,6 +321,23 @@ export default function Roles() {
                           <option key={r.id} value={r.id}>{r.name}</option>
                         ))}
                       </select>
+                    </td>
+                    <td className="p-4">
+                      <div className="flex gap-2">
+                        <textarea
+                          value={identifierDrafts[user.id] || ''}
+                          onChange={(event) => setIdentifierDrafts(prev => ({ ...prev, [user.id]: event.target.value }))}
+                          placeholder="license:... or discord:..."
+                          className="min-h-16 w-full max-w-[260px] resize-y rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 font-mono text-[11px] text-white placeholder-zinc-600 focus:outline-none focus:border-zinc-700"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => handleSaveIdentifiers(user.id)}
+                          className="self-start rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-[10px] font-bold uppercase tracking-wider text-zinc-300 hover:border-zinc-700 hover:text-white"
+                        >
+                          Save
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))}

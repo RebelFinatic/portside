@@ -109,6 +109,27 @@ export const registerApiRoutes = (
     }));
   };
 
+  const monitorAdminFromBody = (body: any) => {
+    const identifiers = cleanIdentifierList(body?.adminIdentifiers || body?.identifiers);
+    return store.findAdminByIdentifiers(identifiers);
+  };
+
+  const adminHasPermission = (admin: { permissions: string[] } | null, permission: string) => (
+    Boolean(admin?.permissions.includes('all_permissions') || admin?.permissions.includes(permission))
+  );
+
+  const menuPermissionForAction = (action: string) => ({
+    kick: 'players.kick',
+    ban: 'players.ban',
+    warn: 'players.warn',
+    direct_message: 'players.direct_message',
+    heal: 'players.heal',
+    freeze: 'players.freeze',
+    teleport: 'players.teleport',
+    spectate: 'players.spectate',
+    viewids: 'menu.viewids',
+  } as Record<string, string>)[action] || '';
+
   let dbPool: mysql.Pool | null = null;
   try {
     if (process.env.DB_HOST && process.env.DB_USER) {
@@ -252,6 +273,178 @@ export const registerApiRoutes = (
     });
     realtime.broadcast('logs', [log]);
     res.json({ ok: true, log });
+  });
+
+  app.post('/api/monitor/admin/auth', requireMonitorToken, (req, res) => {
+    const sourceId = Number.isFinite(Number(req.body?.sourceId)) ? Number(req.body.sourceId) : null;
+    const identifiers = cleanIdentifierList(req.body?.identifiers);
+    const admin = store.findAdminByIdentifiers(identifiers);
+
+    if (!admin) {
+      store.logMonitorEvent({
+        eventName: 'adminAuth',
+        direction: 'inbound',
+        status: 'denied',
+        payload: { sourceId, identifierCount: identifiers.length },
+      });
+      return res.status(403).json({ authorized: false, error: 'No linked Portside admin was found for this player' });
+    }
+
+    store.logMonitorEvent({
+      eventName: 'adminAuth',
+      direction: 'inbound',
+      status: 'success',
+      payload: { sourceId, adminId: admin.id, username: admin.username },
+    });
+
+    res.json({
+      authorized: true,
+      admin: {
+        id: admin.id,
+        username: admin.username,
+        role: admin.role,
+        permissions: admin.permissions,
+      },
+    });
+  });
+
+  app.post('/api/monitor/menu/action', requireMonitorToken, async (req, res) => {
+    const action = typeof req.body?.action === 'string' ? req.body.action.trim() : '';
+    const permission = menuPermissionForAction(action);
+    if (!permission) return res.status(400).json({ error: 'Unsupported menu action' });
+
+    const admin = monitorAdminFromBody(req.body);
+    if (!admin) return res.status(403).json({ error: 'In-game admin is not linked to a Portside admin' });
+    if (!adminHasPermission(admin, permission)) {
+      store.logAction({
+        actorAdminId: admin.id,
+        actorUsername: admin.username,
+        action: `menu.${action}`,
+        method: req.method,
+        route: req.originalUrl,
+        permission,
+        status: 'denied',
+        ip: req.ip,
+        details: { sourceId: req.body?.sourceId, targetSourceId: req.body?.targetSourceId },
+      });
+      return res.status(403).json({ error: `Missing permission: ${permission}` });
+    }
+
+    const targetSourceId = Number.isFinite(Number(req.body?.targetSourceId)) ? Number(req.body.targetSourceId) : null;
+    const target = targetSourceId !== null ? store.getPlayerBySource(targetSourceId) : null;
+    const reason = typeof req.body?.reason === 'string' && req.body.reason.trim() ? req.body.reason.trim() : 'Action from Portside menu';
+    const message = typeof req.body?.message === 'string' ? req.body.message.trim() : '';
+    const duration = typeof req.body?.duration === 'string' && req.body.duration.trim() ? req.body.duration.trim() : 'permanent';
+    const sourceId = Number.isFinite(Number(req.body?.sourceId)) ? Number(req.body.sourceId) : null;
+
+    try {
+      if ((action === 'kick' || action === 'ban' || action === 'warn' || action === 'direct_message') && !target) {
+        return res.status(404).json({ error: 'Target player is not known to Portside yet' });
+      }
+
+      if (action === 'ban' && target) {
+        const activeBan = store.getActiveBanForPlayer(target.id);
+        if (activeBan) return res.status(409).json({ error: 'Player already has an active ban', action: activeBan });
+      }
+
+      let moderationAction: any = null;
+      if (action === 'kick' && target) {
+        moderationAction = store.createModerationAction({
+          type: 'kick',
+          playerId: target.id,
+          reason,
+          authorAdminId: admin.id,
+          authorUsername: admin.username,
+          metadata: { sourceId: targetSourceId, fromMenu: true },
+        });
+        relayMonitorEvent('playerKicked', { target: targetSourceId, author: admin.username, reason, dropMessage: reason });
+      } else if (action === 'ban' && target) {
+        moderationAction = store.createModerationAction({
+          type: 'ban',
+          playerId: target.id,
+          reason,
+          durationInput: duration,
+          authorAdminId: admin.id,
+          authorUsername: admin.username,
+          metadata: { sourceId: targetSourceId, fromMenu: true },
+        });
+        relayMonitorEvent('playerBanned', {
+          author: admin.username,
+          reason,
+          actionId: moderationAction.id,
+          expiration: moderationAction.expiresAt || false,
+          durationInput: duration,
+          targetNetId: targetSourceId,
+          targetIds: moderationAction.targetIdentifiers,
+          targetHwids: moderationAction.targetHwids,
+          targetName: target.displayName,
+          kickMessage: `Banned: ${reason}`,
+        });
+      } else if (action === 'warn' && target) {
+        moderationAction = store.createModerationAction({
+          type: 'warn',
+          playerId: target.id,
+          reason,
+          authorAdminId: admin.id,
+          authorUsername: admin.username,
+          metadata: { sourceId: targetSourceId, fromMenu: true },
+        });
+        relayMonitorEvent('playerWarned', {
+          author: admin.username,
+          reason,
+          actionId: moderationAction.id,
+          targetNetId: targetSourceId,
+          targetIds: moderationAction.targetIdentifiers,
+          targetHwids: moderationAction.targetHwids,
+          targetName: target.displayName,
+        });
+      } else if (action === 'direct_message' && target) {
+        if (!message) return res.status(400).json({ error: 'Message is required' });
+        moderationAction = store.createModerationAction({
+          type: 'dm',
+          playerId: target.id,
+          reason: message,
+          authorAdminId: admin.id,
+          authorUsername: admin.username,
+          metadata: { sourceId: targetSourceId, fromMenu: true },
+        });
+        relayMonitorEvent('playerDirectMessage', {
+          target: targetSourceId,
+          author: admin.username,
+          message,
+          actionId: moderationAction.id,
+          targetIds: moderationAction.targetIdentifiers,
+          targetName: target.displayName,
+        });
+      }
+
+      store.logAction({
+        actorAdminId: admin.id,
+        actorUsername: admin.username,
+        action: `menu.${action}`,
+        method: req.method,
+        route: req.originalUrl,
+        permission,
+        status: 'success',
+        ip: req.ip,
+        details: { sourceId, targetSourceId, reason, message: message ? '[redacted length ' + message.length + ']' : undefined, duration, moderationActionId: moderationAction?.id },
+      });
+
+      res.json({ ok: true, action, permission, moderationAction });
+    } catch (err: any) {
+      store.logAction({
+        actorAdminId: admin.id,
+        actorUsername: admin.username,
+        action: `menu.${action}`,
+        method: req.method,
+        route: req.originalUrl,
+        permission,
+        status: 'failed',
+        ip: req.ip,
+        details: { error: err.message, sourceId, targetSourceId },
+      });
+      res.status(500).json({ error: err.message || 'Menu action failed' });
+    }
   });
 
   app.get('/api/setup/status', (_req, res) => {
@@ -1251,5 +1444,21 @@ export const registerApiRoutes = (
     } catch (err: any) {
       res.status(400).json({ error: err.message || 'Failed to update user role' });
     }
+  });
+
+  app.put('/api/platform-users/:id/identifiers', authenticateToken, requirePermission(store, 'manage.admins'), (req: AuthedRequest, res) => {
+    const identifiers = cleanIdentifierList(req.body?.identifiers);
+    const user = store.setAdminIdentifiers(req.params.id, identifiers);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    store.logAction({
+      ...actionActor(req),
+      action: 'admins.set_identifiers',
+      method: req.method,
+      route: req.originalUrl,
+      permission: 'manage.admins',
+      status: 'success',
+      details: { adminId: req.params.id, identifierCount: identifiers.length },
+    });
+    res.json(user);
   });
 };

@@ -1,7 +1,8 @@
-local VERSION = '0.1.5'
+local VERSION = '0.1.6'
 local RESOURCE_NAME = GetCurrentResourceName()
 local debugMode = false
 local decodePayload
+local adminSessions = {}
 
 local function trimTrailingSlash(value)
   return (value:gsub('/+$', ''))
@@ -115,6 +116,19 @@ local function collectPlayers()
   return players
 end
 
+local function collectMenuPlayers()
+  local players = {}
+  for _, playerId in ipairs(GetPlayers()) do
+    players[#players + 1] = {
+      id = tonumber(playerId),
+      name = GetPlayerName(playerId) or ('Player ' .. playerId),
+      ping = GetPlayerPing(playerId) or 0,
+    }
+  end
+  table.sort(players, function(a, b) return a.id < b.id end)
+  return players
+end
+
 function collectPlayerTokens(playerId)
   local tokens = {}
   local count = GetNumPlayerTokens(playerId)
@@ -166,6 +180,95 @@ local function reportActivity(activityType, message, payload, level, source)
     message = message,
     payload = payload or {},
   })
+end
+
+local function authenticateAdmin(playerId, callback)
+  local identifiers = GetPlayerIdentifiers(playerId)
+  postToPortside('/api/monitor/admin/auth', {
+    sourceId = tonumber(playerId),
+    name = GetPlayerName(playerId),
+    identifiers = identifiers,
+  }, function(ok, statusCode, responseBody)
+    if not ok then
+      adminSessions[playerId] = nil
+      if callback then callback(false, nil, statusCode) end
+      return
+    end
+
+    local decoded = decodePayload(responseBody)
+    if decoded.authorized and decoded.admin then
+      adminSessions[playerId] = decoded.admin
+      TriggerEvent('txAdmin:events:adminAuth', {
+        netid = tonumber(playerId),
+        isAdmin = true,
+        username = decoded.admin.username,
+        permissions = decoded.admin.permissions or {},
+      })
+      if callback then callback(true, decoded.admin, statusCode) end
+      return
+    end
+
+    adminSessions[playerId] = nil
+    if callback then callback(false, nil, statusCode) end
+  end)
+end
+
+local function runMenuAction(playerId, payload, callback)
+  local admin = adminSessions[playerId]
+  if not admin then
+    if callback then callback(false, { error = 'Open the Portside menu again to refresh admin auth.' }) end
+    return
+  end
+
+  local action = payload and payload.action or nil
+  local targetSourceId = tonumber(payload and payload.targetSourceId or 0)
+  postToPortside('/api/monitor/menu/action', {
+    sourceId = tonumber(playerId),
+    adminIdentifiers = GetPlayerIdentifiers(playerId),
+    action = action,
+    targetSourceId = targetSourceId,
+    reason = payload and payload.reason or nil,
+    duration = payload and payload.duration or nil,
+    message = payload and payload.message or nil,
+  }, function(ok, _statusCode, responseBody)
+    local decoded = decodePayload(responseBody)
+    if not ok then
+      if callback then callback(false, decoded) end
+      return
+    end
+
+    if action == 'kick' and targetSourceId and targetSourceId > 0 then
+      DropPlayer(targetSourceId, payload.reason or 'Kicked by Portside')
+    elseif action == 'ban' and targetSourceId and targetSourceId > 0 then
+      DropPlayer(targetSourceId, 'Banned: ' .. (payload.reason or 'Banned by Portside'))
+    elseif action == 'warn' and targetSourceId and targetSourceId > 0 then
+      TriggerClientEvent('portside_monitor:showWarning', targetSourceId, {
+        actionId = decoded.moderationAction and decoded.moderationAction.id or '',
+        author = admin.username or 'Portside',
+        reason = payload.reason or 'Warned by Portside',
+      })
+    elseif action == 'direct_message' and targetSourceId and targetSourceId > 0 then
+      TriggerClientEvent('chat:addMessage', targetSourceId, {
+        color = { 255, 142, 72 },
+        multiline = true,
+        args = { admin.username or 'Portside', payload.message or '' },
+      })
+    elseif action == 'heal' and targetSourceId and targetSourceId > 0 then
+      TriggerClientEvent('portside_monitor:heal', targetSourceId)
+    elseif action == 'freeze' and targetSourceId and targetSourceId > 0 then
+      TriggerClientEvent('portside_monitor:toggleFreeze', targetSourceId)
+    elseif action == 'teleport' and targetSourceId and targetSourceId > 0 then
+      local targetPed = GetPlayerPed(targetSourceId)
+      local coords = GetEntityCoords(targetPed)
+      TriggerClientEvent('portside_monitor:teleportToCoords', playerId, { x = coords.x, y = coords.y, z = coords.z })
+    elseif action == 'spectate' and targetSourceId and targetSourceId > 0 then
+      TriggerClientEvent('portside_monitor:spectatePlayer', playerId, targetSourceId)
+    elseif action == 'viewids' then
+      TriggerClientEvent('portside_monitor:toggleViewIds', playerId)
+    end
+
+    if callback then callback(true, decoded) end
+  end)
 end
 
 local function checkPlayerJoin(playerId, playerName, identifiers, hwids, callback)
@@ -276,6 +379,36 @@ registerBridgeCommand('psaSetDebugMode', function(source, args)
   print(('[portside_monitor] debug mode %s'):format(debugMode and 'enabled' or 'disabled'))
 end)
 
+local function openAdminMenu(source)
+  if source == 0 then
+    print('[portside_monitor] /psa can only be used in-game')
+    return
+  end
+
+  authenticateAdmin(source, function(ok, admin)
+    if not ok then
+      TriggerClientEvent('chat:addMessage', source, {
+        color = { 255, 86, 86 },
+        args = { 'Portside', 'No linked Portside admin was found for this player.' },
+      })
+      return
+    end
+
+    TriggerClientEvent('portside_monitor:openMenu', source, {
+      admin = admin,
+      players = collectMenuPlayers(),
+    })
+  end)
+end
+
+registerBridgeCommand('psa', function(source)
+  openAdminMenu(source)
+end)
+
+RegisterNetEvent('portside_monitor:openMenuRequest', function()
+  openAdminMenu(source)
+end)
+
 if compatCommandsEnabled() then
   registerBridgeCommand('txaPing', function(source)
     if not canUseCommand(source) then return end
@@ -377,6 +510,30 @@ RegisterNetEvent('portside_monitor:warningAcknowledged', function(actionId)
     playerName = GetPlayerName(playerId),
     resourceName = RESOURCE_NAME,
   })
+end)
+
+RegisterNetEvent('portside_monitor:menuAction', function(payload)
+  local playerId = source
+  runMenuAction(playerId, payload or {}, function(ok, result)
+    TriggerClientEvent('portside_monitor:menuActionResult', playerId, {
+      ok = ok,
+      action = payload and payload.action or nil,
+      error = result and result.error or nil,
+      players = collectMenuPlayers(),
+    })
+  end)
+end)
+
+AddEventHandler('playerDropped', function()
+  local playerId = source
+  if adminSessions[playerId] then
+    TriggerEvent('txAdmin:events:adminAuth', {
+      netid = tonumber(playerId),
+      isAdmin = false,
+      username = adminSessions[playerId].username,
+    })
+  end
+  adminSessions[playerId] = nil
 end)
 
 CreateThread(function()

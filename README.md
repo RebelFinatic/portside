@@ -7,6 +7,7 @@ Portside is an open-source operations panel for FiveM servers. It gives server o
 - **Real-time analytics**: Monitor CPU, RAM, player counts, and server activity.
 - **Player management**: View online players, inspect identifiers, kick, ban, and manage staff workflows.
 - **Moderation history**: Store player records, sessions, bans, warnings, direct messages, notes, and ban templates in Portside's internal database.
+- **In-game admin menu**: Open a permission-aware Portside menu in FiveM for core moderation actions.
 - **Whitelist controls**: Approve identifiers, review requests, and optionally block unapproved joins through the monitor bridge.
 - **Discord status embed**: Optionally run a Discord bot that keeps a server status message updated.
 - **Live console**: Read server output and execute console/RCON-style commands from the panel.
@@ -80,7 +81,7 @@ FiveM does not provide one universal vanilla ban command. If your framework expo
 
 ### Portside Monitor Resource
 
-The optional `resources/portside_monitor` bridge closes gaps in FiveM's read-only JSON endpoints. It reports all resources, including stopped resources, resource paths, manifest metadata, player snapshots, player hardware tokens, in-game warning notifications, direct messages, server activity logs, and bridge events. Portside continues to work without it by falling back to FiveM JSON endpoints, RCON, or mock data in local demo mode.
+The optional `resources/portside_monitor` bridge closes gaps in FiveM's read-only JSON endpoints. It reports all resources, including stopped resources, resource paths, manifest metadata, player snapshots, player hardware tokens, in-game warning notifications, direct messages, the in-game admin menu, server activity logs, and bridge events. Portside continues to work without it by falling back to FiveM JSON endpoints, RCON, or mock data in local demo mode.
 
 1. Copy `resources/portside_monitor` into your FXServer resources folder.
 2. Add these lines to `server.cfg`:
@@ -97,11 +98,12 @@ ensure portside_monitor
 PORTSIDE_MONITOR_TOKEN="use_the_same_value_as_portside_monitor_token"
 ```
 
-Restart or reinstall the resource after updating it so the client script and NUI warning modal are loaded by FXServer.
+Restart or reinstall the resource after updating it so the client script, NUI warning modal, and in-game admin menu are loaded by FXServer.
 
 The resource exposes server commands for bridge operations:
 
 - `psaPing`: send an immediate heartbeat.
+- `psa`: open the in-game Portside admin menu for linked admins. The default key mapping is `F9`.
 - `psaReportResources`: send a resource manifest/state snapshot.
 - `psaEvent <eventName> <json>`: relay a Portside-originated txAdmin-compatible event.
 - `psaSetDebugMode true|false`: update replicated debug status in the heartbeat.
@@ -113,6 +115,12 @@ set portside_monitor_compat_txadmin_commands "true"
 ```
 
 The monitor uses `x-portside-monitor-token` for HTTP bridge authentication. Treat this token like a password: do not expose it to clients, log it, or commit it.
+
+### In-Game Admin Menu
+
+The monitor resource includes a minimal Portside admin menu. Link a Portside admin to their FiveM identifiers from Role Management, then use `/psa` or the `F9` keybind in-game. Portside matches the player's identifiers against the linked admin record and sends only that admin's effective permissions to the menu.
+
+The menu currently supports player search/list selection plus permission-gated actions for kick, ban, warn, direct message, heal, freeze, go-to teleport, spectate, and view IDs. Moderation actions still write to Portside's durable moderation history and admin action logs. Server-side permission checks happen on every menu action, so client-side menu visibility is only a convenience.
 
 ### Moderation Database
 
