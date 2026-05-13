@@ -46,17 +46,37 @@ const ansiColorClasses: Record<string, string> = {
 interface ConsoleSegment {
   text: string;
   className: string;
+  style?: React.CSSProperties;
 }
+
+const ansi256Color = (code: number) => {
+  if (code >= 16 && code <= 231) {
+    const value = code - 16;
+    const r = Math.floor(value / 36);
+    const g = Math.floor((value % 36) / 6);
+    const b = value % 6;
+    const channel = (part: number) => part === 0 ? 0 : 55 + part * 40;
+    return `rgb(${channel(r)}, ${channel(g)}, ${channel(b)})`;
+  }
+
+  if (code >= 232 && code <= 255) {
+    const shade = 8 + (code - 232) * 10;
+    return `rgb(${shade}, ${shade}, ${shade})`;
+  }
+
+  return null;
+};
 
 const parseConsoleMessage = (message: string): ConsoleSegment[] => {
   const segments: ConsoleSegment[] = [];
   let currentClass = 'text-zinc-300';
+  let currentStyle: React.CSSProperties | undefined;
   let buffer = '';
   let index = 0;
 
   const pushBuffer = () => {
     if (!buffer) return;
-    segments.push({text: buffer, className: currentClass});
+    segments.push({text: buffer, className: currentClass, style: currentStyle});
     buffer = '';
   };
 
@@ -81,11 +101,24 @@ const parseConsoleMessage = (message: string): ConsoleSegment[] => {
         const codes = match[1].split(';').filter(Boolean);
         if (codes.includes('0')) {
           currentClass = 'text-zinc-300';
+          currentStyle = undefined;
+        }
+
+        const extendedColorIndex = codes.findIndex((code, codeIndex) => (
+          code === '38' && codes[codeIndex + 1] === '5' && Number.isFinite(Number(codes[codeIndex + 2]))
+        ));
+        if (extendedColorIndex !== -1) {
+          const color = ansi256Color(Number(codes[extendedColorIndex + 2]));
+          if (color) {
+            currentClass = '';
+            currentStyle = { color };
+          }
         }
 
         const colorCode = [...codes].reverse().find(code => ansiColorClasses[code]);
         if (colorCode) {
           currentClass = ansiColorClasses[colorCode];
+          currentStyle = undefined;
         }
 
         index += match[0].length;
@@ -110,7 +143,7 @@ function ConsoleMessage({message}: {message: string}) {
         <React.Fragment key={lineIndex}>
           {lineIndex > 0 ? <br /> : null}
           {parseConsoleMessage(line).map((segment, segmentIndex) => (
-            <span key={`${lineIndex}-${segmentIndex}`} className={segment.className}>
+            <span key={`${lineIndex}-${segmentIndex}`} className={segment.className} style={segment.style}>
               {segment.text}
             </span>
           ))}
@@ -136,7 +169,9 @@ export default function Console() {
   const [presetModalOpen, setPresetModalOpen] = useState(false);
   const [newPresetName, setNewPresetName] = useState('');
 
+  const outputRef = useRef<HTMLDivElement>(null);
   const endOfLogsRef = useRef<HTMLDivElement>(null);
+  const shouldFollowTailRef = useRef(true);
 
   const uniqueLevels = useMemo(() => {
     const levels = new Set(logs.map(l => l.level));
@@ -207,8 +242,16 @@ export default function Console() {
   }, [token]);
 
   useEffect(() => {
-    endOfLogsRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [logs]);
+    if (!shouldFollowTailRef.current) return;
+    endOfLogsRef.current?.scrollIntoView({ behavior: 'auto' });
+  }, [filteredLogs.length]);
+
+  const handleOutputScroll = () => {
+    const output = outputRef.current;
+    if (!output) return;
+    const distanceFromBottom = output.scrollHeight - output.scrollTop - output.clientHeight;
+    shouldFollowTailRef.current = distanceFromBottom < 48;
+  };
 
   const savePreset = () => {
     if (!newPresetName.trim()) return;
@@ -234,6 +277,7 @@ export default function Console() {
     if (!input.trim()) return;
     
     const submittedCommand = input.trim();
+    shouldFollowTailRef.current = true;
     
     // Optimistic custom log to local array
     setLogs(prev => [...prev, {
@@ -390,7 +434,11 @@ export default function Console() {
         </div>
 
         {/* Output Area */}
-        <div className="flex-1 overflow-y-auto p-4 font-mono text-[11px] leading-relaxed bg-black/40">
+        <div
+          ref={outputRef}
+          onScroll={handleOutputScroll}
+          className="flex-1 overflow-y-auto p-4 font-mono text-[11px] leading-relaxed bg-black/40"
+        >
           {filteredLogs.map((log) => (
             <div key={log.id} className="flex gap-4 hover:bg-zinc-900/50 px-2 py-0.5 rounded transition-colors group">
               <span className="text-zinc-500 shrink-0">[{format(new Date(log.timestamp), 'HH:mm:ss')}]</span>

@@ -9,6 +9,7 @@ Portside is an open-source operations panel for FiveM servers. It gives server o
 - **Moderation history**: Store player records, sessions, bans, warnings, direct messages, notes, and ban templates in Portside's internal database.
 - **Live console**: Read server output and execute console/RCON-style commands from the panel.
 - **Durable logs**: Persist admin, FXServer/RCON, and server activity logs under Portside's data path.
+- **Optional managed FXServer mode**: Start, stop, restart, supervise crashes, and schedule restarts when Portside is explicitly configured to own the FXServer process.
 - **Resource manager**: Start, stop, restart, search, and inspect FiveM resources.
 - **Portside monitor bridge**: Optional bundled FiveM resource reports stopped resources, manifest metadata, player snapshots, and txAdmin-compatible events.
 - **Configuration editor**: Edit the active FiveM `server.cfg` with basic syntax highlighting.
@@ -36,8 +37,9 @@ Portside is an open-source operations panel for FiveM servers. It gives server o
 6. Set `FIVEM_SERVER_CFG_PATH` to the absolute path of your FiveM `server.cfg`.
 7. To enable live commands, add `set rcon_password "a_strong_password"` in your FiveM `server.cfg`, then set the same value as `FIVEM_RCON_PASSWORD` in `.env`.
 8. To enable the monitor bridge, generate `PORTSIDE_MONITOR_TOKEN`, copy `resources/portside_monitor` into your FXServer resources folder, and add the FiveM convars documented below.
-9. Start development with `pnpm dev`.
-10. Open the panel and complete first-run setup to create the owner admin.
+9. Leave `PORTSIDE_FXSERVER_MODE` as `external` unless you want Portside to launch and supervise FXServer.
+10. Start development with `pnpm dev`.
+11. Open the panel and complete first-run setup to create the owner admin.
 
 ## First-run Setup
 
@@ -136,6 +138,27 @@ The Logs page can search recent entries and download daily log files. `PORTSIDE_
 
 Dashboard CPU and memory values are sampled from the Portside Node process and host instead of generated demo numbers. The host status endpoint is available at `/host/status` and requires `PORTSIDE_HOST_API_TOKEN` or the compatibility alias `TXHOST_API_TOKEN` via `x-portside-envtoken`, `x-txadmin-envtoken`, or `?token=`.
 
+## Managed FXServer Mode
+
+Portside defaults to `PORTSIDE_FXSERVER_MODE="external"`. In external mode, the panel can read FiveM JSON endpoints, use RCON, receive monitor events, and schedule metadata, but it cannot start or stop the FXServer process.
+
+To let Portside manage FXServer, opt in explicitly:
+
+```env
+PORTSIDE_FXSERVER_MODE="managed"
+PORTSIDE_FXSERVER_BINARY="C:/path/to/FXServer.exe"
+PORTSIDE_FXSERVER_CWD="C:/path/to/server-data"
+PORTSIDE_FXSERVER_ARGS="+exec server.cfg"
+PORTSIDE_FXSERVER_RESTART_ON_CRASH="false"
+PORTSIDE_FXSERVER_STOP_TIMEOUT_MS="10000"
+```
+
+If `PORTSIDE_FXSERVER_CWD` or `PORTSIDE_FXSERVER_ARGS` are empty, Portside derives them from `FIVEM_SERVER_CFG_PATH`. For example, `FIVEM_SERVER_CFG_PATH="C:/txData/default/server.cfg"` makes managed mode run from `C:/txData/default` with `+exec server.cfg`. This prevents FXServer from looking for `server.cfg` beside `FXServer.exe`.
+
+Managed mode streams FXServer stdout and stderr into durable `fxserver` logs. Dashboard users with `control.server` can start, stop, restart, create daily restart schedules, and skip the next scheduled occurrence. Stop and restart actions require a reason and are written to admin action logs.
+
+Scheduled restarts emit txAdmin-compatible monitor events: `serverShuttingDown`, `scheduledRestart`, and `scheduledRestartSkipped`. If Portside is in external mode, lifecycle API calls return a managed-mode-required error instead of trying to control a process it does not own.
+
 ## Scripts
 
 - `pnpm dev`: Run the local development server.
@@ -152,6 +175,7 @@ Dashboard CPU and memory values are sampled from the Portside Node process and h
 - **Admin action logs** record successful sensitive actions and denied permission attempts, with durable log files for operational review.
 - **RCON credentials** enable live server commands and should be treated as production secrets.
 - **Monitor tokens** authenticate the FiveM resource bridge and should be treated as production secrets.
+- **Managed process controls** are powerful. Only grant `control.server` to trusted admins and configure managed mode with a dedicated server-data directory.
 - **Environment variables** should be stored in `.env` and never committed.
 - **Debug mode** (`DEBUG=true` / `VITE_DEBUG=true`) bypasses real auth and grants all permissions. Use it only for local demos.
 

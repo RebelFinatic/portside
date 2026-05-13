@@ -6,6 +6,10 @@ import { PortsideStore } from './store';
 import { MemoryLogger } from './logging';
 import { registerApiRoutes } from './routes';
 import { RealtimeHub } from './realtime';
+import { FxServerManager } from './fxserver';
+import { RestartScheduler } from './scheduler';
+import { createRconRunner } from './fivem';
+import { createMonitorEventRelay } from './monitor';
 
 export async function startServer() {
   const app = express();
@@ -13,12 +17,17 @@ export async function startServer() {
   const store = new PortsideStore();
   const logger = new MemoryLogger();
   const realtime = new RealtimeHub();
+  const fxServer = new FxServerManager(logger);
 
   app.use(express.json());
   logger.cleanup();
   logger.add('INFO', 'Portside Server starting...', 'system', 'server');
 
-  registerApiRoutes(app, store, logger, realtime);
+  const relayMonitorEvent = createMonitorEventRelay(store, logger, createRconRunner(logger));
+  const scheduler = new RestartScheduler(store, logger, fxServer, relayMonitorEvent);
+  scheduler.start();
+
+  registerApiRoutes(app, store, logger, realtime, fxServer, relayMonitorEvent);
 
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({

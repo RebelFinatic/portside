@@ -7,6 +7,12 @@ import { cleanIdentifierList, listsOverlap, parseDurationToExpiration } from './
 
 const now = () => new Date().toISOString();
 
+const normalizeWarningMinutes = (minutes: unknown = [30, 15, 10, 5, 4, 3, 2, 1]) => {
+  const values = Array.isArray(minutes) ? minutes : [30, 15, 10, 5, 4, 3, 2, 1];
+  return [...new Set(values.map(Number).filter(value => Number.isFinite(value) && value > 0 && value <= 1440))]
+    .sort((a, b) => b - a);
+};
+
 export interface RoleRecord {
   id: string;
   name: string;
@@ -74,6 +80,19 @@ export interface PlayerRecord {
   firstSeenAt: string;
   lastSeenAt: string;
   lastSource: number | null;
+}
+
+export interface RestartScheduleRecord {
+  id: string;
+  name: string;
+  enabled: boolean;
+  type: 'daily' | 'temporary';
+  timeOfDay: string | null;
+  executeAt: string | null;
+  warningMinutes: number[];
+  message: string | null;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export class PortsideStore {
@@ -270,6 +289,39 @@ export class PortsideStore {
         duration TEXT NOT NULL,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS restart_schedules (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        type TEXT NOT NULL DEFAULT 'daily',
+        time_of_day TEXT,
+        execute_at TEXT,
+        warning_minutes TEXT,
+        message TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS restart_skips (
+        id TEXT PRIMARY KEY,
+        schedule_id TEXT NOT NULL,
+        occurrence_at TEXT NOT NULL,
+        temporary INTEGER NOT NULL DEFAULT 1,
+        author_admin_id TEXT,
+        author_username TEXT,
+        created_at TEXT NOT NULL,
+        UNIQUE(schedule_id, occurrence_at)
+      );
+
+      CREATE TABLE IF NOT EXISTS restart_markers (
+        id TEXT PRIMARY KEY,
+        schedule_id TEXT NOT NULL,
+        occurrence_at TEXT NOT NULL,
+        marker TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE(schedule_id, occurrence_at, marker)
       );
     `);
 
@@ -543,6 +595,147 @@ export class PortsideStore {
       : `SELECT id, timestamp, username, command, status, output FROM console_command_history ORDER BY timestamp DESC LIMIT ?`;
     const params = adminId ? [adminId, limit] : [limit];
     return this.db.prepare(sql).all(...params);
+  }
+
+  private mapRestartSchedule(row: any): RestartScheduleRecord {
+    return {
+      id: row.id,
+      name: row.name,
+      enabled: Boolean(row.enabled),
+      type: row.type === 'temporary' ? 'temporary' : 'daily',
+      timeOfDay: row.time_of_day,
+      executeAt: row.execute_at,
+      warningMinutes: this.parseJsonArray(row.warning_minutes).filter((value: unknown): value is number => Number.isFinite(Number(value))).map(Number),
+      message: row.message,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  listRestartSchedules(): RestartScheduleRecord[] {
+    const rows = this.db.prepare(`
+      SELECT id, name, enabled, type, time_of_day, execute_at, warning_minutes, message, created_at, updated_at
+      FROM restart_schedules
+      ORDER BY enabled DESC, type ASC, COALESCE(execute_at, time_of_day) ASC
+    `).all() as any[];
+    return rows.map(row => this.mapRestartSchedule(row));
+  }
+
+  getRestartSchedule(id: string): RestartScheduleRecord | null {
+    const row = this.db.prepare(`
+      SELECT id, name, enabled, type, time_of_day, execute_at, warning_minutes, message, created_at, updated_at
+      FROM restart_schedules
+      WHERE id = ?
+    `).get(id) as any;
+    return row ? this.mapRestartSchedule(row) : null;
+  }
+
+  createRestartSchedule(input: {
+    name: string;
+    type: 'daily' | 'temporary';
+    timeOfDay?: string | null;
+    executeAt?: string | null;
+    warningMinutes?: number[];
+    message?: string | null;
+    enabled?: boolean;
+  }) {
+    const id = crypto.randomUUID();
+    const timestamp = now();
+    const warnings = normalizeWarningMinutes(input.warningMinutes);
+    this.db.prepare(`
+      INSERT INTO restart_schedules (id, name, enabled, type, time_of_day, execute_at, warning_minutes, message, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      id,
+      input.name,
+      input.enabled === false ? 0 : 1,
+      input.type,
+      input.timeOfDay || null,
+      input.executeAt || null,
+      JSON.stringify(warnings),
+      input.message || null,
+      timestamp,
+      timestamp
+    );
+    return this.getRestartSchedule(id)!;
+  }
+
+  updateRestartSchedule(id: string, input: {
+    name: string;
+    enabled: boolean;
+    timeOfDay?: string | null;
+    executeAt?: string | null;
+    warningMinutes?: number[];
+    message?: string | null;
+  }) {
+    const existing = this.getRestartSchedule(id);
+    if (!existing) return null;
+    this.db.prepare(`
+      UPDATE restart_schedules
+      SET name = ?, enabled = ?, time_of_day = ?, execute_at = ?, warning_minutes = ?, message = ?, updated_at = ?
+      WHERE id = ?
+    `).run(
+      input.name,
+      input.enabled ? 1 : 0,
+      input.timeOfDay || null,
+      input.executeAt || null,
+      JSON.stringify(normalizeWarningMinutes(input.warningMinutes)),
+      input.message || null,
+      now(),
+      id
+    );
+    return this.getRestartSchedule(id);
+  }
+
+  deleteRestartSchedule(id: string) {
+    const result = this.db.prepare('DELETE FROM restart_schedules WHERE id = ?').run(id);
+    this.db.prepare('DELETE FROM restart_skips WHERE schedule_id = ?').run(id);
+    this.db.prepare('DELETE FROM restart_markers WHERE schedule_id = ?').run(id);
+    return result.changes > 0;
+  }
+
+  skipRestartOccurrence(input: {
+    scheduleId: string;
+    occurrenceAt: string;
+    temporary?: boolean;
+    authorAdminId?: string | null;
+    authorUsername?: string | null;
+  }) {
+    this.db.prepare(`
+      INSERT INTO restart_skips (id, schedule_id, occurrence_at, temporary, author_admin_id, author_username, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(schedule_id, occurrence_at) DO UPDATE SET
+        temporary = excluded.temporary,
+        author_admin_id = excluded.author_admin_id,
+        author_username = excluded.author_username,
+        created_at = excluded.created_at
+    `).run(
+      crypto.randomUUID(),
+      input.scheduleId,
+      input.occurrenceAt,
+      input.temporary === false ? 0 : 1,
+      input.authorAdminId || null,
+      input.authorUsername || null,
+      now()
+    );
+  }
+
+  isRestartSkipped(scheduleId: string, occurrenceAt: string) {
+    const row = this.db.prepare('SELECT 1 FROM restart_skips WHERE schedule_id = ? AND occurrence_at = ?').get(scheduleId, occurrenceAt);
+    return Boolean(row);
+  }
+
+  markRestartEvent(scheduleId: string, occurrenceAt: string, marker: string) {
+    try {
+      this.db.prepare(`
+        INSERT INTO restart_markers (id, schedule_id, occurrence_at, marker, created_at)
+        VALUES (?, ?, ?, ?, ?)
+      `).run(crypto.randomUUID(), scheduleId, occurrenceAt, marker, now());
+      return true;
+    } catch (error: any) {
+      if (String(error.message || '').includes('UNIQUE')) return false;
+      throw error;
+    }
   }
 
   upsertMonitorHeartbeat(input: {

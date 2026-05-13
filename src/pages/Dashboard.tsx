@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import {
   Activity,
   AlertTriangle,
+  CalendarClock,
   ChevronRight,
   Clock,
   Cpu,
@@ -10,9 +11,12 @@ import {
   FileCode2,
   HardDrive,
   Loader2,
+  Play,
   Radio,
   RefreshCw,
+  RotateCcw,
   Server,
+  Square,
   TerminalSquare,
   Users,
   Zap,
@@ -31,6 +35,7 @@ import {
 import { formatDistanceToNowStrict } from 'date-fns';
 import { apiFetch } from '../lib/api';
 import { toast } from 'sonner';
+import { useAuthStore } from '../store/useAuthStore';
 
 interface ServerStatus {
   online: boolean;
@@ -49,6 +54,32 @@ interface ServerStatus {
       cpuCount?: number;
     };
   };
+  fxserver?: FxServerStatus;
+}
+
+interface FxServerStatus {
+  mode: 'external' | 'managed';
+  state: string;
+  enabled: boolean;
+  pid: number | null;
+  startedAt: string | null;
+  uptimeSeconds: number | null;
+  crashCount: number;
+  restartOnCrash: boolean;
+  lastExitReason: string | null;
+  binaryConfigured: boolean;
+  cwdConfigured: boolean;
+}
+
+interface RestartSchedule {
+  id: string;
+  name: string;
+  enabled: boolean;
+  type: 'daily' | 'temporary';
+  timeOfDay: string | null;
+  executeAt: string | null;
+  nextOccurrenceAt: string | null;
+  message: string | null;
 }
 
 interface Player {
@@ -86,26 +117,37 @@ export default function Dashboard() {
   const [players, setPlayers] = useState<Player[]>([]);
   const [resources, setResources] = useState<Resource[]>([]);
   const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [fxStatus, setFxStatus] = useState<FxServerStatus | null>(null);
+  const [restartSchedules, setRestartSchedules] = useState<RestartSchedule[]>([]);
   const [samples, setSamples] = useState<MetricSample[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [controlAction, setControlAction] = useState<string | null>(null);
+  const [controlReason, setControlReason] = useState('Routine server maintenance');
+  const [scheduleTime, setScheduleTime] = useState('06:00');
+  const [scheduleMessage, setScheduleMessage] = useState('Scheduled restart by Portside');
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
+  const hasServerControl = useAuthStore(state => state.hasPermission('control.server'));
 
   const fetchDashboard = async ({ silent = false } = {}) => {
     if (!silent) setRefreshing(true);
 
     try {
-      const [nextStatus, nextPlayers, nextResources, nextLogs] = await Promise.all([
+      const [nextStatus, nextPlayers, nextResources, nextLogs, nextControl, nextRestarts] = await Promise.all([
         apiFetch('/server/status'),
         apiFetch('/players'),
         apiFetch('/resources'),
         apiFetch('/logs'),
+        hasServerControl ? apiFetch('/server/control/status') : Promise.resolve(null),
+        hasServerControl ? apiFetch('/server/restarts') : Promise.resolve([]),
       ]);
 
       setStatus(nextStatus);
       setPlayers(Array.isArray(nextPlayers) ? nextPlayers : []);
       setResources(Array.isArray(nextResources) ? nextResources : []);
       setLogs(Array.isArray(nextLogs) ? nextLogs : []);
+      setFxStatus(nextControl || nextStatus.fxserver || null);
+      setRestartSchedules(Array.isArray(nextRestarts) ? nextRestarts : []);
       setLastUpdated(new Date());
       setSamples(prev => [
         ...prev.slice(-35),
@@ -130,7 +172,57 @@ export default function Dashboard() {
     fetchDashboard();
     const interval = window.setInterval(() => fetchDashboard({ silent: true }), 5000);
     return () => window.clearInterval(interval);
-  }, []);
+  }, [hasServerControl]);
+
+  const runControlAction = async (action: 'start' | 'stop' | 'restart') => {
+    const reason = controlReason.trim();
+    if ((action === 'stop' || action === 'restart') && !reason) {
+      toast.error('Reason is required');
+      return;
+    }
+
+    setControlAction(action);
+    try {
+      const nextStatus = await apiFetch(`/server/control/${action}`, {
+        method: 'POST',
+        body: JSON.stringify({ reason: reason || 'Started from Portside' }),
+      });
+      setFxStatus(nextStatus);
+      toast.success(`Server ${action} request completed`);
+    } catch (error: any) {
+      toast.error(error.message || `Failed to ${action} server`);
+    } finally {
+      setControlAction(null);
+    }
+  };
+
+  const createDailyRestart = async () => {
+    try {
+      const schedule = await apiFetch('/server/restarts', {
+        method: 'POST',
+        body: JSON.stringify({
+          name: `Daily restart ${scheduleTime}`,
+          timeOfDay: scheduleTime,
+          message: scheduleMessage,
+        }),
+      });
+      setRestartSchedules(prev => [schedule, ...prev]);
+      toast.success('Restart schedule created');
+    } catch (error: any) {
+      toast.error(error.message || 'Failed to create restart schedule');
+    }
+  };
+
+  const skipRestart = async (id: string) => {
+    try {
+      await apiFetch(`/server/restarts/${id}/skip-next`, { method: 'POST' });
+      toast.success('Next restart skipped');
+      const schedules = await apiFetch('/server/restarts');
+      setRestartSchedules(Array.isArray(schedules) ? schedules : []);
+    } catch (error: any) {
+      toast.error(error.message || 'Failed to skip restart');
+    }
+  };
 
   const runningResources = resources.filter(resource => resource.state === 'started').length;
   const stoppedResources = Math.max(resources.length - runningResources, 0);
@@ -344,6 +436,73 @@ export default function Dashboard() {
         </Panel>
       </div>
 
+      {hasServerControl && (
+        <div className="mb-6 grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
+          <Panel
+            title="Server Control"
+            subtitle={fxStatus?.mode === 'managed' ? 'Managed FXServer lifecycle' : 'External mode: lifecycle controls disabled'}
+            icon={<Server className="h-4 w-4" />}
+          >
+            <div className="grid grid-cols-2 gap-3">
+              <SmallStat label="Mode" value={fxStatus?.mode || 'external'} tone={fxStatus?.mode === 'managed' ? 'text-emerald-400' : 'text-zinc-400'} />
+              <SmallStat label="State" value={fxStatus?.state || 'external'} tone={fxStatus?.state === 'online' ? 'text-emerald-400' : 'text-orange-400'} />
+              <SmallStat label="PID" value={fxStatus?.pid || 'none'} tone="text-blue-400" />
+              <SmallStat label="Crashes" value={fxStatus?.crashCount ?? 0} tone="text-red-400" />
+            </div>
+            <input
+              value={controlReason}
+              onChange={event => setControlReason(event.target.value)}
+              className="mt-4 w-full rounded border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-white outline-none focus:border-orange-600"
+              placeholder="Reason for stop/restart"
+            />
+            <div className="mt-3 grid grid-cols-3 gap-2">
+              <ControlButton label="Start" icon={<Play className="h-3.5 w-3.5" />} loading={controlAction === 'start'} onClick={() => runControlAction('start')} />
+              <ControlButton label="Stop" icon={<Square className="h-3.5 w-3.5" />} loading={controlAction === 'stop'} onClick={() => runControlAction('stop')} danger />
+              <ControlButton label="Restart" icon={<RotateCcw className="h-3.5 w-3.5" />} loading={controlAction === 'restart'} onClick={() => runControlAction('restart')} />
+            </div>
+            {fxStatus?.lastExitReason && (
+              <p className="mt-3 line-clamp-2 text-xs text-zinc-500">Last reason: {fxStatus.lastExitReason}</p>
+            )}
+          </Panel>
+
+          <Panel title="Restart Scheduler" subtitle="Scheduled warnings and managed restarts" icon={<CalendarClock className="h-4 w-4" />}>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-[120px_minmax(0,1fr)_auto]">
+              <input
+                type="time"
+                value={scheduleTime}
+                onChange={event => setScheduleTime(event.target.value)}
+                className="rounded border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-white outline-none focus:border-orange-600"
+              />
+              <input
+                value={scheduleMessage}
+                onChange={event => setScheduleMessage(event.target.value)}
+                className="rounded border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-white outline-none focus:border-orange-600"
+                placeholder="Warning message"
+              />
+              <button onClick={createDailyRestart} className="rounded border border-orange-700/60 bg-orange-600/10 px-3 py-2 text-xs font-bold uppercase tracking-wider text-orange-300 hover:bg-orange-600/20">
+                Add
+              </button>
+            </div>
+            <div className="mt-4 space-y-2">
+              {restartSchedules.slice(0, 5).map(schedule => (
+                <div key={schedule.id} className="flex items-center justify-between gap-3 rounded border border-zinc-800/70 bg-black/20 px-3 py-2">
+                  <div className="min-w-0">
+                    <div className="truncate text-sm font-medium text-white">{schedule.name}</div>
+                    <div className="text-[10px] uppercase tracking-wider text-zinc-600">
+                      {schedule.type} · {schedule.nextOccurrenceAt ? new Date(schedule.nextOccurrenceAt).toLocaleString() : 'disabled'}
+                    </div>
+                  </div>
+                  <button onClick={() => skipRestart(schedule.id)} className="shrink-0 rounded border border-zinc-800 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-zinc-400 hover:border-orange-600/50 hover:text-orange-300">
+                    Skip
+                  </button>
+                </div>
+              ))}
+              {restartSchedules.length === 0 && <EmptyLine>No restart schedules configured.</EmptyLine>}
+            </div>
+          </Panel>
+        </div>
+      )}
+
       <Panel title="Operations" subtitle="Fast paths to common server work" icon={<Zap className="h-4 w-4" />}>
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
           <QuickAction to="/console" icon={<TerminalSquare className="h-4 w-4" />} title="Open Console" description="Run RCON commands and inspect output." />
@@ -478,6 +637,35 @@ function QuickAction({ to, icon, title, description }: { to: string; icon: React
       </div>
       <ChevronRight className="mt-1 h-4 w-4 shrink-0 text-zinc-600 transition-transform group-hover:translate-x-1 group-hover:text-orange-500" />
     </Link>
+  );
+}
+
+function ControlButton({
+  label,
+  icon,
+  loading,
+  danger,
+  onClick,
+}: {
+  label: string;
+  icon: ReactNode;
+  loading: boolean;
+  danger?: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      disabled={loading}
+      className={`inline-flex items-center justify-center gap-2 rounded border px-3 py-2 text-xs font-bold uppercase tracking-wider transition-colors disabled:opacity-60 ${
+        danger
+          ? 'border-red-900/70 bg-red-950/30 text-red-300 hover:border-red-700'
+          : 'border-zinc-800 bg-zinc-950 text-zinc-200 hover:border-orange-600/50 hover:text-orange-300'
+      }`}
+    >
+      {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : icon}
+      {label}
+    </button>
   );
 }
 

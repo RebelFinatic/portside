@@ -17,6 +17,8 @@ import {
 import { MONITOR_VERSION, createMonitorEventRelay, requireMonitorToken, safeEventName } from './monitor';
 import { cleanIdentifierList } from './moderation';
 import type { RealtimeHub } from './realtime';
+import type { FxServerManager } from './fxserver';
+import { nextOccurrenceForSchedule } from './scheduler';
 import {
   createAuthMiddleware,
   createOwner,
@@ -63,10 +65,19 @@ const hasHostToken = (req: AuthedRequest) => {
   return supplied === expected;
 };
 
-export const registerApiRoutes = (app: Express, store: PortsideStore, logger: MemoryLogger, realtime: RealtimeHub) => {
+type RelayMonitorEvent = (eventName: string, payload: Record<string, unknown>) => Promise<boolean>;
+
+export const registerApiRoutes = (
+  app: Express,
+  store: PortsideStore,
+  logger: MemoryLogger,
+  realtime: RealtimeHub,
+  fxServer: FxServerManager,
+  relayMonitorEventOverride?: RelayMonitorEvent
+) => {
   const authenticateToken = createAuthMiddleware(store);
   const runRconCommand = createRconRunner(logger);
-  const relayMonitorEvent = createMonitorEventRelay(store, logger, runRconCommand);
+  const relayMonitorEvent = relayMonitorEventOverride || createMonitorEventRelay(store, logger, runRconCommand);
 
   const listOnlinePlayers = async () => {
     const monitorStatus = store.getMonitorStatus();
@@ -313,10 +324,67 @@ export const registerApiRoutes = (app: Express, store: PortsideStore, logger: Me
         uptime: metrics.process.uptime,
         metrics,
         monitor: monitorStatus,
+        fxserver: fxServer.getStatus(),
       });
     } catch (err: any) {
       logger.add('ERROR', `Could not fetch server status: ${err.message}`, 'system', 'server');
       res.status(500).json({ error: 'Failed to fetch status' });
+    }
+  });
+
+  app.get('/api/server/control/status', authenticateToken, requirePermission(store, 'control.server'), (_req, res) => {
+    res.json(fxServer.getStatus());
+  });
+
+  app.post('/api/server/control/start', authenticateToken, requirePermission(store, 'control.server'), async (req: AuthedRequest, res) => {
+    const reason = typeof req.body?.reason === 'string' && req.body.reason.trim() ? req.body.reason.trim() : 'Started from Portside';
+    try {
+      const status = await fxServer.start(reason);
+      store.logAction({ ...actionActor(req), action: 'server.start', method: req.method, route: req.originalUrl, permission: 'control.server', status: 'success', details: { reason, status } });
+      realtime.broadcast('status', { fxserver: status });
+      res.json(status);
+    } catch (error: any) {
+      store.logAction({ ...actionActor(req), action: 'server.start', method: req.method, route: req.originalUrl, permission: 'control.server', status: 'failed', details: { reason, error: error.message } });
+      res.status(fxServer.isManagedMode() ? 400 : 409).json({ error: error.message });
+    }
+  });
+
+  app.post('/api/server/control/stop', authenticateToken, requirePermission(store, 'control.server'), async (req: AuthedRequest, res) => {
+    const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : '';
+    if (!reason) return res.status(400).json({ error: 'Stop reason is required' });
+    try {
+      await relayMonitorEvent('serverShuttingDown', {
+        delay: 0,
+        author: req.user?.username || 'Portside',
+        message: reason,
+      });
+      const status = await fxServer.stop(reason);
+      store.logAction({ ...actionActor(req), action: 'server.stop', method: req.method, route: req.originalUrl, permission: 'control.server', status: 'success', details: { reason, status } });
+      realtime.broadcast('status', { fxserver: status });
+      res.json(status);
+    } catch (error: any) {
+      store.logAction({ ...actionActor(req), action: 'server.stop', method: req.method, route: req.originalUrl, permission: 'control.server', status: 'failed', details: { reason, error: error.message } });
+      res.status(fxServer.isManagedMode() ? 400 : 409).json({ error: error.message });
+    }
+  });
+
+  app.post('/api/server/control/restart', authenticateToken, requirePermission(store, 'control.server'), async (req: AuthedRequest, res) => {
+    const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : '';
+    if (!reason) return res.status(400).json({ error: 'Restart reason is required' });
+    const delayMs = Math.max(0, Math.min(Number(req.body?.delayMs || 0), 10 * 60 * 1000));
+    try {
+      await relayMonitorEvent('serverShuttingDown', {
+        delay: delayMs,
+        author: req.user?.username || 'Portside',
+        message: typeof req.body?.message === 'string' && req.body.message.trim() ? req.body.message.trim() : reason,
+      });
+      const status = await fxServer.restart(reason, delayMs);
+      store.logAction({ ...actionActor(req), action: 'server.restart', method: req.method, route: req.originalUrl, permission: 'control.server', status: 'success', details: { reason, delayMs, status } });
+      realtime.broadcast('status', { fxserver: status });
+      res.json(status);
+    } catch (error: any) {
+      store.logAction({ ...actionActor(req), action: 'server.restart', method: req.method, route: req.originalUrl, permission: 'control.server', status: 'failed', details: { reason, delayMs, error: error.message } });
+      res.status(fxServer.isManagedMode() ? 400 : 409).json({ error: error.message });
     }
   });
 
@@ -335,6 +403,98 @@ export const registerApiRoutes = (app: Express, store: PortsideStore, logger: Me
         version: status.version,
       },
     });
+  });
+
+  const normalizeWarnings = (value: unknown) => (
+    Array.isArray(value) ? value.map(Number).filter(item => Number.isFinite(item) && item > 0) : [30, 15, 10, 5, 4, 3, 2, 1]
+  );
+
+  const decorateSchedules = () => store.listRestartSchedules().map(schedule => ({
+    ...schedule,
+    nextOccurrenceAt: schedule.enabled ? nextOccurrenceForSchedule(schedule)?.toISOString() || null : null,
+  }));
+
+  app.get('/api/server/restarts', authenticateToken, requirePermission(store, 'control.server'), (_req, res) => {
+    res.json(decorateSchedules());
+  });
+
+  app.post('/api/server/restarts', authenticateToken, requirePermission(store, 'control.server'), (req: AuthedRequest, res) => {
+    const name = typeof req.body?.name === 'string' && req.body.name.trim() ? req.body.name.trim() : 'Daily restart';
+    const timeOfDay = typeof req.body?.timeOfDay === 'string' ? req.body.timeOfDay.trim() : '';
+    if (!/^\d{2}:\d{2}$/.test(timeOfDay)) return res.status(400).json({ error: 'timeOfDay must use HH:mm format' });
+    const schedule = store.createRestartSchedule({
+      name,
+      type: 'daily',
+      timeOfDay,
+      warningMinutes: normalizeWarnings(req.body?.warningMinutes),
+      message: typeof req.body?.message === 'string' ? req.body.message.trim() : null,
+      enabled: req.body?.enabled !== false,
+    });
+    store.logAction({ ...actionActor(req), action: 'server.restart_schedule.create', method: req.method, route: req.originalUrl, permission: 'control.server', status: 'success', details: { scheduleId: schedule.id } });
+    res.status(201).json({ ...schedule, nextOccurrenceAt: nextOccurrenceForSchedule(schedule)?.toISOString() || null });
+  });
+
+  app.put('/api/server/restarts/:id', authenticateToken, requirePermission(store, 'control.server'), (req: AuthedRequest, res) => {
+    const existing = store.getRestartSchedule(req.params.id);
+    if (!existing) return res.status(404).json({ error: 'Restart schedule not found' });
+    const name = typeof req.body?.name === 'string' && req.body.name.trim() ? req.body.name.trim() : existing.name;
+    const timeOfDay = existing.type === 'daily'
+      ? (typeof req.body?.timeOfDay === 'string' ? req.body.timeOfDay.trim() : existing.timeOfDay)
+      : null;
+    if (existing.type === 'daily' && (!timeOfDay || !/^\d{2}:\d{2}$/.test(timeOfDay))) return res.status(400).json({ error: 'timeOfDay must use HH:mm format' });
+    const schedule = store.updateRestartSchedule(req.params.id, {
+      name,
+      enabled: req.body?.enabled !== undefined ? Boolean(req.body.enabled) : existing.enabled,
+      timeOfDay,
+      executeAt: existing.type === 'temporary' && typeof req.body?.executeAt === 'string' ? new Date(req.body.executeAt).toISOString() : existing.executeAt,
+      warningMinutes: normalizeWarnings(req.body?.warningMinutes || existing.warningMinutes),
+      message: typeof req.body?.message === 'string' ? req.body.message.trim() : existing.message,
+    });
+    store.logAction({ ...actionActor(req), action: 'server.restart_schedule.update', method: req.method, route: req.originalUrl, permission: 'control.server', status: 'success', details: { scheduleId: req.params.id } });
+    res.json(schedule ? { ...schedule, nextOccurrenceAt: nextOccurrenceForSchedule(schedule)?.toISOString() || null } : null);
+  });
+
+  app.delete('/api/server/restarts/:id', authenticateToken, requirePermission(store, 'control.server'), (req: AuthedRequest, res) => {
+    const deleted = store.deleteRestartSchedule(req.params.id);
+    store.logAction({ ...actionActor(req), action: 'server.restart_schedule.delete', method: req.method, route: req.originalUrl, permission: 'control.server', status: deleted ? 'success' : 'failed', details: { scheduleId: req.params.id } });
+    res.json({ success: deleted });
+  });
+
+  app.post('/api/server/restarts/:id/skip-next', authenticateToken, requirePermission(store, 'control.server'), async (req: AuthedRequest, res) => {
+    const schedule = store.getRestartSchedule(req.params.id);
+    if (!schedule) return res.status(404).json({ error: 'Restart schedule not found' });
+    const occurrence = nextOccurrenceForSchedule(schedule);
+    if (!occurrence) return res.status(400).json({ error: 'No upcoming restart occurrence to skip' });
+    store.skipRestartOccurrence({
+      scheduleId: schedule.id,
+      occurrenceAt: occurrence.toISOString(),
+      authorAdminId: req.user?.id,
+      authorUsername: req.user?.username,
+    });
+    const secondsRemaining = Math.max(0, Math.floor((occurrence.getTime() - Date.now()) / 1000));
+    await relayMonitorEvent('scheduledRestartSkipped', {
+      secondsRemaining,
+      temporary: true,
+      author: req.user?.username || 'Portside',
+    });
+    store.logAction({ ...actionActor(req), action: 'server.restart_schedule.skip_next', method: req.method, route: req.originalUrl, permission: 'control.server', status: 'success', details: { scheduleId: schedule.id, occurrenceAt: occurrence.toISOString() } });
+    res.json({ success: true, occurrenceAt: occurrence.toISOString() });
+  });
+
+  app.post('/api/server/restarts/temporary', authenticateToken, requirePermission(store, 'control.server'), (req: AuthedRequest, res) => {
+    const executeAt = typeof req.body?.executeAt === 'string' ? new Date(req.body.executeAt) : null;
+    if (!executeAt || Number.isNaN(executeAt.getTime()) || executeAt.getTime() <= Date.now()) {
+      return res.status(400).json({ error: 'executeAt must be a future ISO timestamp' });
+    }
+    const schedule = store.createRestartSchedule({
+      name: typeof req.body?.name === 'string' && req.body.name.trim() ? req.body.name.trim() : 'Temporary restart',
+      type: 'temporary',
+      executeAt: executeAt.toISOString(),
+      warningMinutes: normalizeWarnings(req.body?.warningMinutes),
+      message: typeof req.body?.message === 'string' ? req.body.message.trim() : null,
+    });
+    store.logAction({ ...actionActor(req), action: 'server.restart_temporary.create', method: req.method, route: req.originalUrl, permission: 'control.server', status: 'success', details: { scheduleId: schedule.id, executeAt: schedule.executeAt } });
+    res.status(201).json({ ...schedule, nextOccurrenceAt: nextOccurrenceForSchedule(schedule)?.toISOString() || null });
   });
 
   app.get('/api/players', authenticateToken, async (_req, res) => {
