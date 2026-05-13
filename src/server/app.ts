@@ -10,6 +10,7 @@ import { FxServerManager } from './fxserver';
 import { RestartScheduler } from './scheduler';
 import { createRconRunner } from './fivem';
 import { createMonitorEventRelay } from './monitor';
+import { DiscordStatusService } from './discord';
 
 export async function startServer() {
   const app = express();
@@ -18,6 +19,7 @@ export async function startServer() {
   const logger = new MemoryLogger();
   const realtime = new RealtimeHub();
   const fxServer = new FxServerManager(logger);
+  const discordStatus = new DiscordStatusService(store, logger, fxServer);
 
   app.use(express.json());
   logger.cleanup();
@@ -26,8 +28,9 @@ export async function startServer() {
   const relayMonitorEvent = createMonitorEventRelay(store, logger, createRconRunner(logger));
   const scheduler = new RestartScheduler(store, logger, fxServer, relayMonitorEvent);
   scheduler.start();
+  discordStatus.start();
 
-  registerApiRoutes(app, store, logger, realtime, fxServer, relayMonitorEvent);
+  registerApiRoutes(app, store, logger, realtime, fxServer, relayMonitorEvent, discordStatus);
 
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({

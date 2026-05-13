@@ -1,4 +1,4 @@
-local VERSION = '0.1.4'
+local VERSION = '0.1.5'
 local RESOURCE_NAME = GetCurrentResourceName()
 local debugMode = false
 local decodePayload
@@ -169,11 +169,19 @@ local function reportActivity(activityType, message, payload, level, source)
 end
 
 local function checkPlayerJoin(playerId, playerName, identifiers, hwids, callback)
+  local discordId = nil
+  for _, identifier in ipairs(identifiers or {}) do
+    if identifier:sub(1, 8) == 'discord:' then
+      discordId = identifier:sub(9)
+    end
+  end
+
   postToPortside('/api/monitor/player/check-join', {
     sourceId = tonumber(playerId),
     name = playerName,
     identifiers = identifiers,
     hwids = hwids,
+    discordId = discordId,
   }, function(ok, statusCode, responseBody)
     if not ok then
       callback(true)

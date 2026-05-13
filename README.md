@@ -7,6 +7,8 @@ Portside is an open-source operations panel for FiveM servers. It gives server o
 - **Real-time analytics**: Monitor CPU, RAM, player counts, and server activity.
 - **Player management**: View online players, inspect identifiers, kick, ban, and manage staff workflows.
 - **Moderation history**: Store player records, sessions, bans, warnings, direct messages, notes, and ban templates in Portside's internal database.
+- **Whitelist controls**: Approve identifiers, review requests, and optionally block unapproved joins through the monitor bridge.
+- **Discord status embed**: Optionally run a Discord bot that keeps a server status message updated.
 - **Live console**: Read server output and execute console/RCON-style commands from the panel.
 - **Durable logs**: Persist admin, FXServer/RCON, and server activity logs under Portside's data path.
 - **Optional managed FXServer mode**: Start, stop, restart, supervise crashes, and schedule restarts when Portside is explicitly configured to own the FXServer process.
@@ -24,6 +26,7 @@ Portside is an open-source operations panel for FiveM servers. It gives server o
 - JWT-backed sessions
 - SQLite internal data store for Portside admins, roles, sessions, and audit logs
 - Optional FiveM monitor resource under `resources/portside_monitor`
+- Optional Discord bot support via `discord.js`
 - Rotating file logs under `PORTSIDE_DATA_PATH/logs`
 - Password hashing with `bcrypt`
 
@@ -126,6 +129,38 @@ Current moderation features include:
 
 Framework ban commands are optional compatibility side effects for online bans. Portside's internal moderation records are the source of truth for join blocking. If the monitor cannot reach Portside during a join check, the resource allows the join to avoid accidentally locking out a live server.
 
+### Whitelist
+
+Portside can keep a durable whitelist in its internal SQLite database. Entries can approve a FiveM identifier, Discord ID, or known Portside player record. Staff with `players.whitelist` can manage entries and review pending requests from the Whitelist page.
+
+Whitelist enforcement is opt-in:
+
+```env
+PORTSIDE_WHITELIST_MODE="disabled"
+```
+
+Supported modes are:
+
+- `disabled`: joins are never blocked by the whitelist.
+- `dry-run`: unapproved joins are allowed but logged as would-be denied decisions.
+- `enforced`: unapproved joins are denied by the monitor join-check route.
+
+Active bans still take priority over whitelist approvals. The monitor resource must be installed and `PORTSIDE_MONITOR_TOKEN` must be configured for join blocking to work.
+
+### Discord Status
+
+Set `PORTSIDE_DISCORD_BOT_TOKEN` in `.env` to enable the Discord bot foundation. The bot token is read from the environment only and is never stored in SQLite or sent to the browser. Non-secret settings such as guild ID, status channel ID, status message ID, and update interval can be configured from the Whitelist page or via these defaults:
+
+```env
+PORTSIDE_DISCORD_BOT_TOKEN=""
+PORTSIDE_DISCORD_GUILD_ID=""
+PORTSIDE_DISCORD_STATUS_CHANNEL_ID=""
+PORTSIDE_DISCORD_STATUS_MESSAGE_ID=""
+PORTSIDE_DISCORD_STATUS_INTERVAL_SECONDS="60"
+```
+
+The status embed reports lifecycle state, players/max, monitor state, Portside uptime, and next scheduled restart. If no message ID is configured, Portside sends a new message and stores the created message ID in its internal settings.
+
 ## Logs, Console, And Metrics
 
 Portside writes durable operational logs to `PORTSIDE_DATA_PATH/logs`:
@@ -175,6 +210,7 @@ Scheduled restarts emit txAdmin-compatible monitor events: `serverShuttingDown`,
 - **Admin action logs** record successful sensitive actions and denied permission attempts, with durable log files for operational review.
 - **RCON credentials** enable live server commands and should be treated as production secrets.
 - **Monitor tokens** authenticate the FiveM resource bridge and should be treated as production secrets.
+- **Discord bot tokens** are environment-only secrets. Do not store them in SQLite, paste them into the UI, or commit them.
 - **Managed process controls** are powerful. Only grant `control.server` to trusted admins and configure managed mode with a dedicated server-data directory.
 - **Environment variables** should be stored in `.env` and never committed.
 - **Debug mode** (`DEBUG=true` / `VITE_DEBUG=true`) bypasses real auth and grants all permissions. Use it only for local demos.

@@ -18,6 +18,7 @@ import { MONITOR_VERSION, createMonitorEventRelay, requireMonitorToken, safeEven
 import { cleanIdentifierList } from './moderation';
 import type { RealtimeHub } from './realtime';
 import type { FxServerManager } from './fxserver';
+import type { DiscordStatusService } from './discord';
 import { nextOccurrenceForSchedule } from './scheduler';
 import {
   createAuthMiddleware,
@@ -73,7 +74,8 @@ export const registerApiRoutes = (
   logger: MemoryLogger,
   realtime: RealtimeHub,
   fxServer: FxServerManager,
-  relayMonitorEventOverride?: RelayMonitorEvent
+  relayMonitorEventOverride?: RelayMonitorEvent,
+  discordStatus?: DiscordStatusService
 ) => {
   const authenticateToken = createAuthMiddleware(store);
   const runRconCommand = createRconRunner(logger);
@@ -190,13 +192,14 @@ export const registerApiRoutes = (
       name: typeof req.body?.name === 'string' ? req.body.name : 'Connecting Player',
       identifiers: cleanIdentifierList(req.body?.identifiers),
       hwids: cleanIdentifierList(req.body?.hwids),
+      discordId: typeof req.body?.discordId === 'string' ? req.body.discordId : null,
     });
 
     store.logMonitorEvent({
       eventName: 'player.checkJoin',
       direction: 'inbound',
       status: result.allow ? 'allowed' : 'denied',
-      payload: { sourceId, playerId: result.player.id, actionId: result.action?.id },
+      payload: { sourceId, playerId: result.player.id, actionId: result.action?.id, decision: result.decision },
     });
 
     res.json(result.allow ? { allow: true } : { allow: false, reason: result.reason });
@@ -416,6 +419,108 @@ export const registerApiRoutes = (
 
   app.get('/api/server/restarts', authenticateToken, requirePermission(store, 'control.server'), (_req, res) => {
     res.json(decorateSchedules());
+  });
+
+  app.get('/api/whitelist/status', authenticateToken, requirePermission(store, 'players.whitelist'), (_req, res) => {
+    res.json({
+      mode: store.getWhitelistMode(),
+      entries: store.listWhitelistEntries().length,
+      pendingRequests: store.listWhitelistRequests('pending').length,
+      discord: {
+        ...store.getDiscordStatusSettings(),
+        bot: discordStatus?.getStatus() || { configured: false, enabled: false, connected: false, lastUpdateAt: null, lastError: null },
+        tokenConfigured: Boolean(process.env.PORTSIDE_DISCORD_BOT_TOKEN),
+      },
+    });
+  });
+
+  app.get('/api/whitelist/entries', authenticateToken, requirePermission(store, 'players.whitelist'), (_req, res) => {
+    res.json(store.listWhitelistEntries());
+  });
+
+  app.post('/api/whitelist/entries', authenticateToken, requirePermission(store, 'players.whitelist'), (req: AuthedRequest, res) => {
+    try {
+      const type = req.body?.type === 'discord' || req.body?.type === 'player' ? req.body.type : 'identifier';
+      const value = typeof req.body?.value === 'string' ? req.body.value.trim() : '';
+      const note = typeof req.body?.note === 'string' ? req.body.note.trim() : '';
+      if (!value) return res.status(400).json({ error: 'Whitelist value is required' });
+      const entry = store.createWhitelistEntry({
+        type,
+        value,
+        playerId: typeof req.body?.playerId === 'string' ? req.body.playerId : null,
+        discordId: typeof req.body?.discordId === 'string' ? req.body.discordId : null,
+        note: note || null,
+        actorAdminId: req.user?.id || null,
+        actorUsername: req.user?.username || null,
+      });
+      store.logAction({ ...actionActor(req), action: 'whitelist.entry.create', method: req.method, route: req.originalUrl, permission: 'players.whitelist', status: 'success', details: { entryId: entry.id, type: entry.type } });
+      res.status(201).json(entry);
+    } catch (error: any) {
+      res.status(400).json({ error: error.message || 'Failed to create whitelist entry' });
+    }
+  });
+
+  app.delete('/api/whitelist/entries/:id', authenticateToken, requirePermission(store, 'players.whitelist'), (req: AuthedRequest, res) => {
+    const deleted = store.deleteWhitelistEntry(req.params.id);
+    store.logAction({ ...actionActor(req), action: 'whitelist.entry.delete', method: req.method, route: req.originalUrl, permission: 'players.whitelist', status: deleted ? 'success' : 'failed', details: { entryId: req.params.id } });
+    if (!deleted) return res.status(404).json({ error: 'Whitelist entry not found' });
+    res.json({ success: true });
+  });
+
+  app.get('/api/whitelist/requests', authenticateToken, requirePermission(store, 'players.whitelist'), (req, res) => {
+    res.json(store.listWhitelistRequests(typeof req.query.status === 'string' ? req.query.status : undefined));
+  });
+
+  app.post('/api/whitelist/requests', authenticateToken, requirePermission(store, 'players.whitelist'), async (req: AuthedRequest, res) => {
+    const playerName = typeof req.body?.playerName === 'string' && req.body.playerName.trim() ? req.body.playerName.trim() : 'Unknown Player';
+    const request = store.createWhitelistRequest({
+      playerName,
+      identifiers: cleanIdentifierList(req.body?.identifiers),
+      hwids: cleanIdentifierList(req.body?.hwids),
+      discordId: typeof req.body?.discordId === 'string' ? req.body.discordId.trim() : null,
+      reason: typeof req.body?.reason === 'string' ? req.body.reason.trim() : null,
+    });
+    await relayMonitorEvent('whitelistRequest', { requestId: request.id, playerName, identifiers: request.identifiers, discordId: request.discordId });
+    store.logAction({ ...actionActor(req), action: 'whitelist.request.create', method: req.method, route: req.originalUrl, permission: 'players.whitelist', status: 'success', details: { requestId: request.id } });
+    res.status(201).json(request);
+  });
+
+  const reviewWhitelistRequest = (status: 'approved' | 'rejected') => async (req: AuthedRequest, res: Response) => {
+    const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : '';
+    const request = store.reviewWhitelistRequest({
+      id: req.params.id,
+      status,
+      reason: reason || null,
+      actorAdminId: req.user?.id || null,
+      actorUsername: req.user?.username || null,
+    });
+    if (!request) return res.status(404).json({ error: 'Whitelist request not found' });
+    if (status === 'approved') {
+      await relayMonitorEvent('whitelistPreApproval', { requestId: request.id, playerName: request.playerName, identifiers: request.identifiers, discordId: request.discordId });
+    }
+    store.logAction({ ...actionActor(req), action: `whitelist.request.${status}`, method: req.method, route: req.originalUrl, permission: 'players.whitelist', status: 'success', details: { requestId: request.id } });
+    res.json(request);
+  };
+
+  app.post('/api/whitelist/requests/:id/approve', authenticateToken, requirePermission(store, 'players.whitelist'), reviewWhitelistRequest('approved'));
+  app.post('/api/whitelist/requests/:id/reject', authenticateToken, requirePermission(store, 'players.whitelist'), reviewWhitelistRequest('rejected'));
+
+  app.put('/api/discord/status-settings', authenticateToken, requirePermission(store, 'players.whitelist'), async (req: AuthedRequest, res) => {
+    const settings = store.updateDiscordStatusSettings({
+      enabled: Boolean(req.body?.enabled),
+      guildId: typeof req.body?.guildId === 'string' ? req.body.guildId.trim() : null,
+      statusChannelId: typeof req.body?.statusChannelId === 'string' ? req.body.statusChannelId.trim() : null,
+      statusMessageId: typeof req.body?.statusMessageId === 'string' ? req.body.statusMessageId.trim() : null,
+      updateIntervalSeconds: Number(req.body?.updateIntervalSeconds || 60),
+    });
+    store.logAction({ ...actionActor(req), action: 'discord.status_settings.update', method: req.method, route: req.originalUrl, permission: 'players.whitelist', status: 'success', details: { enabled: settings.enabled } });
+    if (settings.enabled) {
+      await discordStatus?.start();
+      await discordStatus?.updateStatusEmbed();
+    } else {
+      discordStatus?.stop();
+    }
+    res.json({ ...settings, tokenConfigured: Boolean(process.env.PORTSIDE_DISCORD_BOT_TOKEN), bot: discordStatus?.getStatus() });
   });
 
   app.post('/api/server/restarts', authenticateToken, requirePermission(store, 'control.server'), (req: AuthedRequest, res) => {

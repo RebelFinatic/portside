@@ -2,7 +2,7 @@ import type { Request, Response, NextFunction } from 'express';
 import type { MemoryLogger } from './logging';
 import type { PortsideStore } from './store';
 
-export const MONITOR_VERSION = '0.1.4';
+export const MONITOR_VERSION = '0.1.5';
 
 const allowedRelayEvents = new Set([
   'announcement',
@@ -15,6 +15,8 @@ const allowedRelayEvents = new Set([
   'serverShuttingDown',
   'scheduledRestart',
   'scheduledRestartSkipped',
+  'whitelistPreApproval',
+  'whitelistRequest',
 ]);
 
 export const requireMonitorToken = (req: Request, res: Response, next: NextFunction) => {

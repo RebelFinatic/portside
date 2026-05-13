@@ -95,6 +95,44 @@ export interface RestartScheduleRecord {
   updatedAt: string;
 }
 
+export type WhitelistMode = 'disabled' | 'dry-run' | 'enforced';
+export type WhitelistEntryType = 'identifier' | 'discord' | 'player';
+export type WhitelistRequestStatus = 'pending' | 'approved' | 'rejected';
+
+export interface WhitelistEntryRecord {
+  id: string;
+  type: WhitelistEntryType;
+  value: string;
+  playerId: string | null;
+  discordId: string | null;
+  note: string | null;
+  createdAt: string;
+  createdByUsername: string | null;
+}
+
+export interface WhitelistRequestRecord {
+  id: string;
+  status: WhitelistRequestStatus;
+  playerName: string;
+  identifiers: string[];
+  hwids: string[];
+  discordId: string | null;
+  reason: string | null;
+  createdAt: string;
+  reviewedAt: string | null;
+  reviewedByUsername: string | null;
+  reviewReason: string | null;
+}
+
+export interface DiscordStatusSettingsRecord {
+  enabled: boolean;
+  guildId: string | null;
+  statusChannelId: string | null;
+  statusMessageId: string | null;
+  updateIntervalSeconds: number;
+  updatedAt: string;
+}
+
 export class PortsideStore {
   readonly db: Database.Database;
 
@@ -322,6 +360,45 @@ export class PortsideStore {
         marker TEXT NOT NULL,
         created_at TEXT NOT NULL,
         UNIQUE(schedule_id, occurrence_at, marker)
+      );
+
+      CREATE TABLE IF NOT EXISTS whitelist_entries (
+        id TEXT PRIMARY KEY,
+        type TEXT NOT NULL,
+        value TEXT NOT NULL,
+        player_id TEXT,
+        discord_id TEXT,
+        note TEXT,
+        created_at TEXT NOT NULL,
+        created_by_admin_id TEXT,
+        created_by_username TEXT,
+        UNIQUE(type, value),
+        FOREIGN KEY (player_id) REFERENCES players(id) ON DELETE SET NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS whitelist_requests (
+        id TEXT PRIMARY KEY,
+        status TEXT NOT NULL,
+        player_name TEXT NOT NULL,
+        identifiers TEXT,
+        hwids TEXT,
+        discord_id TEXT,
+        reason TEXT,
+        created_at TEXT NOT NULL,
+        reviewed_at TEXT,
+        reviewed_by_admin_id TEXT,
+        reviewed_by_username TEXT,
+        review_reason TEXT
+      );
+
+      CREATE TABLE IF NOT EXISTS discord_status_settings (
+        id TEXT PRIMARY KEY CHECK (id = 'current'),
+        enabled INTEGER NOT NULL DEFAULT 0,
+        guild_id TEXT,
+        status_channel_id TEXT,
+        status_message_id TEXT,
+        update_interval_seconds INTEGER NOT NULL DEFAULT 60,
+        updated_at TEXT NOT NULL
       );
     `);
 
@@ -595,6 +672,227 @@ export class PortsideStore {
       : `SELECT id, timestamp, username, command, status, output FROM console_command_history ORDER BY timestamp DESC LIMIT ?`;
     const params = adminId ? [adminId, limit] : [limit];
     return this.db.prepare(sql).all(...params);
+  }
+
+  getWhitelistMode(): WhitelistMode {
+    const mode = (process.env.PORTSIDE_WHITELIST_MODE || 'disabled').toLowerCase();
+    return mode === 'enforced' || mode === 'dry-run' ? mode : 'disabled';
+  }
+
+  private mapWhitelistEntry(row: any): WhitelistEntryRecord {
+    return {
+      id: row.id,
+      type: row.type === 'discord' || row.type === 'player' ? row.type : 'identifier',
+      value: row.value,
+      playerId: row.player_id,
+      discordId: row.discord_id,
+      note: row.note,
+      createdAt: row.created_at,
+      createdByUsername: row.created_by_username,
+    };
+  }
+
+  listWhitelistEntries(): WhitelistEntryRecord[] {
+    return (this.db.prepare(`
+      SELECT id, type, value, player_id, discord_id, note, created_at, created_by_username
+      FROM whitelist_entries
+      ORDER BY created_at DESC
+    `).all() as any[]).map(row => this.mapWhitelistEntry(row));
+  }
+
+  createWhitelistEntry(input: {
+    type: WhitelistEntryType;
+    value: string;
+    playerId?: string | null;
+    discordId?: string | null;
+    note?: string | null;
+    actorAdminId?: string | null;
+    actorUsername?: string | null;
+  }) {
+    const id = crypto.randomUUID();
+    const timestamp = now();
+    const value = input.value.trim().toLowerCase();
+    this.db.prepare(`
+      INSERT INTO whitelist_entries (id, type, value, player_id, discord_id, note, created_at, created_by_admin_id, created_by_username)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      id,
+      input.type,
+      value,
+      input.playerId || null,
+      input.discordId || (input.type === 'discord' ? value : null),
+      input.note || null,
+      timestamp,
+      input.actorAdminId || null,
+      input.actorUsername || null
+    );
+    return this.listWhitelistEntries().find(entry => entry.id === id)!;
+  }
+
+  deleteWhitelistEntry(id: string) {
+    const result = this.db.prepare('DELETE FROM whitelist_entries WHERE id = ?').run(id);
+    return result.changes > 0;
+  }
+
+  private mapWhitelistRequest(row: any): WhitelistRequestRecord {
+    return {
+      id: row.id,
+      status: row.status === 'approved' || row.status === 'rejected' ? row.status : 'pending',
+      playerName: row.player_name,
+      identifiers: this.parseJsonArray(row.identifiers),
+      hwids: this.parseJsonArray(row.hwids),
+      discordId: row.discord_id,
+      reason: row.reason,
+      createdAt: row.created_at,
+      reviewedAt: row.reviewed_at,
+      reviewedByUsername: row.reviewed_by_username,
+      reviewReason: row.review_reason,
+    };
+  }
+
+  listWhitelistRequests(status?: string): WhitelistRequestRecord[] {
+    const rows = status && ['pending', 'approved', 'rejected'].includes(status)
+      ? this.db.prepare('SELECT * FROM whitelist_requests WHERE status = ? ORDER BY created_at DESC').all(status) as any[]
+      : this.db.prepare('SELECT * FROM whitelist_requests ORDER BY created_at DESC').all() as any[];
+    return rows.map(row => this.mapWhitelistRequest(row));
+  }
+
+  getWhitelistRequest(id: string): WhitelistRequestRecord | null {
+    const row = this.db.prepare('SELECT * FROM whitelist_requests WHERE id = ?').get(id) as any;
+    return row ? this.mapWhitelistRequest(row) : null;
+  }
+
+  createWhitelistRequest(input: {
+    playerName: string;
+    identifiers?: string[];
+    hwids?: string[];
+    discordId?: string | null;
+    reason?: string | null;
+  }) {
+    const id = crypto.randomUUID();
+    this.db.prepare(`
+      INSERT INTO whitelist_requests (id, status, player_name, identifiers, hwids, discord_id, reason, created_at)
+      VALUES (?, 'pending', ?, ?, ?, ?, ?, ?)
+    `).run(
+      id,
+      input.playerName || 'Unknown Player',
+      JSON.stringify(cleanIdentifierList(input.identifiers)),
+      JSON.stringify(cleanIdentifierList(input.hwids)),
+      input.discordId || null,
+      input.reason || null,
+      now()
+    );
+    return this.getWhitelistRequest(id)!;
+  }
+
+  reviewWhitelistRequest(input: {
+    id: string;
+    status: 'approved' | 'rejected';
+    reason?: string | null;
+    actorAdminId?: string | null;
+    actorUsername?: string | null;
+  }) {
+    const request = this.getWhitelistRequest(input.id);
+    if (!request) return null;
+    const timestamp = now();
+    const review = this.db.transaction(() => {
+      this.db.prepare(`
+        UPDATE whitelist_requests
+        SET status = ?, reviewed_at = ?, reviewed_by_admin_id = ?, reviewed_by_username = ?, review_reason = ?
+        WHERE id = ?
+      `).run(input.status, timestamp, input.actorAdminId || null, input.actorUsername || null, input.reason || null, input.id);
+
+      if (input.status === 'approved') {
+        const identifiers = cleanIdentifierList(request.identifiers);
+        const primaryIdentifier = identifiers[0];
+        if (primaryIdentifier) {
+          try {
+            this.createWhitelistEntry({
+              type: 'identifier',
+              value: primaryIdentifier,
+              note: `Approved request from ${request.playerName}`,
+              actorAdminId: input.actorAdminId,
+              actorUsername: input.actorUsername,
+            });
+          } catch {
+            // Existing whitelist entries are treated as already approved.
+          }
+        }
+        if (request.discordId) {
+          try {
+            this.createWhitelistEntry({
+              type: 'discord',
+              value: request.discordId,
+              discordId: request.discordId,
+              note: `Approved request from ${request.playerName}`,
+              actorAdminId: input.actorAdminId,
+              actorUsername: input.actorUsername,
+            });
+          } catch {
+            // Existing whitelist entries are treated as already approved.
+          }
+        }
+      }
+    });
+    review();
+    return this.getWhitelistRequest(input.id);
+  }
+
+  private whitelistAllows(player: PlayerRecord | null, identifiers: string[], discordId?: string | null) {
+    const normalizedIdentifiers = cleanIdentifierList(identifiers).map(identifier => identifier.toLowerCase());
+    const normalizedDiscordId = typeof discordId === 'string' ? discordId.trim().toLowerCase() : '';
+    const entries = this.listWhitelistEntries();
+    return entries.some(entry => {
+      if (entry.type === 'identifier') return normalizedIdentifiers.includes(entry.value);
+      if (entry.type === 'discord') return normalizedDiscordId && entry.value === normalizedDiscordId;
+      if (entry.type === 'player') return player && entry.playerId === player.id;
+      return false;
+    });
+  }
+
+  getDiscordStatusSettings(): DiscordStatusSettingsRecord {
+    const envGuildId = process.env.PORTSIDE_DISCORD_GUILD_ID || null;
+    const envChannelId = process.env.PORTSIDE_DISCORD_STATUS_CHANNEL_ID || null;
+    const envMessageId = process.env.PORTSIDE_DISCORD_STATUS_MESSAGE_ID || null;
+    const row = this.db.prepare('SELECT * FROM discord_status_settings WHERE id = ?').get('current') as any;
+    return {
+      enabled: Boolean(row?.enabled),
+      guildId: row?.guild_id || envGuildId,
+      statusChannelId: row?.status_channel_id || envChannelId,
+      statusMessageId: row?.status_message_id || envMessageId,
+      updateIntervalSeconds: Math.max(30, Number(row?.update_interval_seconds || process.env.PORTSIDE_DISCORD_STATUS_INTERVAL_SECONDS || 60)),
+      updatedAt: row?.updated_at || now(),
+    };
+  }
+
+  updateDiscordStatusSettings(input: {
+    enabled: boolean;
+    guildId?: string | null;
+    statusChannelId?: string | null;
+    statusMessageId?: string | null;
+    updateIntervalSeconds?: number;
+  }) {
+    const timestamp = now();
+    const interval = Math.max(30, Math.min(Number(input.updateIntervalSeconds || 60), 3600));
+    this.db.prepare(`
+      INSERT INTO discord_status_settings (id, enabled, guild_id, status_channel_id, status_message_id, update_interval_seconds, updated_at)
+      VALUES ('current', ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        enabled = excluded.enabled,
+        guild_id = excluded.guild_id,
+        status_channel_id = excluded.status_channel_id,
+        status_message_id = excluded.status_message_id,
+        update_interval_seconds = excluded.update_interval_seconds,
+        updated_at = excluded.updated_at
+    `).run(
+      input.enabled ? 1 : 0,
+      input.guildId || null,
+      input.statusChannelId || null,
+      input.statusMessageId || null,
+      interval,
+      timestamp
+    );
+    return this.getDiscordStatusSettings();
   }
 
   private mapRestartSchedule(row: any): RestartScheduleRecord {
@@ -1330,7 +1628,7 @@ export class PortsideStore {
     return row.playerId as string;
   }
 
-  checkJoin(input: { name: string; identifiers?: string[]; hwids?: string[]; sourceId?: number | null }) {
+  checkJoin(input: { name: string; identifiers?: string[]; hwids?: string[]; sourceId?: number | null; discordId?: string | null }) {
     const identifiers = cleanIdentifierList(input.identifiers);
     const hwids = cleanIdentifierList(input.hwids);
     const player = this.upsertPlayerSnapshot({
@@ -1350,12 +1648,27 @@ export class PortsideStore {
       listsOverlap(action.targetHwids, hwids)
     ));
 
-    if (!ban) return { allow: true, player };
-    return {
+    if (ban) return {
       allow: false,
       player,
       action: ban,
       reason: `Banned from this server: ${ban.reason || 'No reason provided'}`,
+      decision: 'banned',
+    };
+
+    const whitelistMode = this.getWhitelistMode();
+    if (whitelistMode === 'disabled') return { allow: true, player, decision: 'whitelist_disabled' };
+
+    const whitelisted = this.whitelistAllows(player, identifiers, input.discordId);
+    if (whitelisted) return { allow: true, player, decision: 'whitelisted' };
+
+    const reason = 'This server is whitelisted. Submit a whitelist request or contact staff.';
+    if (whitelistMode === 'dry-run') return { allow: true, player, reason, decision: 'whitelist_dry_run' };
+    return {
+      allow: false,
+      player,
+      reason,
+      decision: 'whitelist_denied',
     };
   }
 
