@@ -1218,6 +1218,14 @@ export class PortsideStore {
     }
   }
 
+  private normalizePlayerName(value: string | null | undefined) {
+    return (value || '').trim().toLowerCase();
+  }
+
+  private playerHasIdentity(player: Pick<PlayerRecord, 'identifiers' | 'hwids'>) {
+    return player.identifiers.length > 0 || player.hwids.length > 0;
+  }
+
   private findPlayerByIdentifiersOrHwids(identifiers: string[], hwids: string[]): PlayerRecord | null {
     const rows = this.db.prepare('SELECT * FROM players').all() as any[];
     const match = rows.find(row => (
@@ -1225,6 +1233,28 @@ export class PortsideStore {
       listsOverlap(this.parseJsonArray(row.hwids), hwids)
     ));
     return match ? this.mapPlayer(match) : null;
+  }
+
+  private findIdentifierlessPlayerBySourceOrName(sourceId: number | null | undefined, name: string): PlayerRecord | null {
+    const normalizedName = this.normalizePlayerName(name);
+    if (!normalizedName && sourceId === null && sourceId === undefined) return null;
+
+    const rows = this.db.prepare('SELECT * FROM players ORDER BY last_seen_at DESC').all() as any[];
+    const match = rows.find(row => {
+      const player = this.mapPlayer(row);
+      if (this.playerHasIdentity(player)) return false;
+      if (sourceId !== null && sourceId !== undefined && player.lastSource === sourceId) return true;
+      return normalizedName.length > 0 && this.normalizePlayerName(player.displayName) === normalizedName;
+    });
+
+    return match ? this.mapPlayer(match) : null;
+  }
+
+  private monitorPlayerMatchesPlayer(item: MonitorPlayerRecord, player: PlayerRecord) {
+    if (item.id === player.lastSource) return true;
+    if (listsOverlap(item.identifiers, player.identifiers) || listsOverlap(item.hwids, player.hwids)) return true;
+    if (this.playerHasIdentity(player) || item.identifiers.length > 0 || item.hwids.length > 0) return false;
+    return this.normalizePlayerName(item.name) === this.normalizePlayerName(player.displayName);
   }
 
   private mapPlayer(row: any): PlayerRecord {
@@ -1250,7 +1280,8 @@ export class PortsideStore {
     const timestamp = now();
     const identifiers = cleanIdentifierList(input.identifiers);
     const hwids = cleanIdentifierList(input.hwids);
-    const existing = this.findPlayerByIdentifiersOrHwids(identifiers, hwids);
+    const existing = this.findPlayerByIdentifiersOrHwids(identifiers, hwids)
+      || this.findIdentifierlessPlayerBySourceOrName(input.sourceId, input.name);
     const displayName = input.name || existing?.displayName || 'Unknown Player';
 
     if (!existing) {
@@ -1434,7 +1465,8 @@ export class PortsideStore {
   getPlayerBySource(sourceId: number) {
     const monitor = this.db.prepare('SELECT name, identifiers, hwids FROM monitor_players WHERE id = ?').get(sourceId) as any;
     if (!monitor) return null;
-    return this.findPlayerByIdentifiersOrHwids(this.parseJsonArray(monitor.identifiers), this.parseJsonArray(monitor.hwids));
+    return this.findPlayerByIdentifiersOrHwids(this.parseJsonArray(monitor.identifiers), this.parseJsonArray(monitor.hwids))
+      || this.findIdentifierlessPlayerBySourceOrName(sourceId, monitor.name);
   }
 
   searchPlayers(query = '', limit = 100) {
@@ -1445,11 +1477,7 @@ export class PortsideStore {
     return rows
       .map(row => {
         const player = this.mapPlayer(row);
-        const onlinePlayer = online.find(item => (
-          item.id === player.lastSource ||
-          listsOverlap(item.identifiers, player.identifiers) ||
-          listsOverlap(item.hwids, player.hwids)
-        ));
+        const onlinePlayer = online.find(item => this.monitorPlayerMatchesPlayer(item, player));
         const actions = this.db.prepare('SELECT type, revoked_at as revokedAt, expires_at as expiresAt FROM moderation_actions WHERE player_id = ? ORDER BY created_at DESC').all(player.id) as any[];
         return {
           ...player,
@@ -1482,11 +1510,7 @@ export class PortsideStore {
   getPlayerProfile(id: string) {
     const player = this.getPlayer(id);
     if (!player) return null;
-    const online = this.listMonitorPlayers().find(item => (
-      item.id === player.lastSource ||
-      listsOverlap(item.identifiers, player.identifiers) ||
-      listsOverlap(item.hwids, player.hwids)
-    ));
+    const online = this.listMonitorPlayers().find(item => this.monitorPlayerMatchesPlayer(item, player));
 
     const sessions = this.db.prepare(`
       SELECT id, source_id as sourceId, joined_at as joinedAt, left_at as leftAt, drop_reason as dropReason, identifiers, hwids

@@ -98,6 +98,30 @@ local function collectResources()
   return resources
 end
 
+local function collectPlayerIdentifiers(playerId)
+  local identifiers = {}
+  local count = GetNumPlayerIdentifiers(playerId)
+  for index = 0, count - 1 do
+    local identifier = GetPlayerIdentifier(playerId, index)
+    if identifier and identifier ~= '' then
+      identifiers[#identifiers + 1] = identifier
+    end
+  end
+  return identifiers
+end
+
+function collectPlayerTokens(playerId)
+  local tokens = {}
+  local count = GetNumPlayerTokens(playerId)
+  for index = 0, count - 1 do
+    local token = GetPlayerToken(playerId, index)
+    if token and token ~= '' then
+      tokens[#tokens + 1] = token
+    end
+  end
+  return tokens
+end
+
 local function collectPlayers()
   local players = {}
 
@@ -107,7 +131,7 @@ local function collectPlayers()
       id = numericId,
       name = GetPlayerName(playerId) or ('Player ' .. playerId),
       ping = GetPlayerPing(playerId) or 0,
-      identifiers = GetPlayerIdentifiers(playerId),
+      identifiers = collectPlayerIdentifiers(playerId),
       hwids = collectPlayerTokens(playerId),
       endpoint = GetPlayerEndpoint(playerId),
     }
@@ -127,18 +151,6 @@ local function collectMenuPlayers()
   end
   table.sort(players, function(a, b) return a.id < b.id end)
   return players
-end
-
-function collectPlayerTokens(playerId)
-  local tokens = {}
-  local count = GetNumPlayerTokens(playerId)
-  for index = 0, count - 1 do
-    local token = GetPlayerToken(playerId, index)
-    if token and token ~= '' then
-      tokens[#tokens + 1] = token
-    end
-  end
-  return tokens
 end
 
 local function sendHeartbeat()
@@ -183,7 +195,7 @@ local function reportActivity(activityType, message, payload, level, source)
 end
 
 local function authenticateAdmin(playerId, callback)
-  local identifiers = GetPlayerIdentifiers(playerId)
+  local identifiers = collectPlayerIdentifiers(playerId)
   postToPortside('/api/monitor/admin/auth', {
     sourceId = tonumber(playerId),
     name = GetPlayerName(playerId),
@@ -224,7 +236,7 @@ local function runMenuAction(playerId, payload, callback)
   local targetSourceId = tonumber(payload and payload.targetSourceId or 0)
   postToPortside('/api/monitor/menu/action', {
     sourceId = tonumber(playerId),
-    adminIdentifiers = GetPlayerIdentifiers(playerId),
+    adminIdentifiers = collectPlayerIdentifiers(playerId),
     action = action,
     targetSourceId = targetSourceId,
     reason = payload and payload.reason or nil,
@@ -452,7 +464,7 @@ AddEventHandler('playerJoining', function()
   reportActivity('player.join', ('%s joined the server'):format(GetPlayerName(playerId) or ('Player ' .. playerId)), {
     id = tonumber(playerId),
     name = GetPlayerName(playerId),
-    identifiers = GetPlayerIdentifiers(playerId),
+    identifiers = collectPlayerIdentifiers(playerId),
   }, 'INFO', 'players')
   SetTimeout(1000, reportPlayers)
 end)
@@ -462,7 +474,7 @@ AddEventHandler('playerConnecting', function(playerName, _setKickReason, deferra
   deferrals.defer()
   deferrals.update('Checking Portside moderation records...')
 
-  local identifiers = GetPlayerIdentifiers(playerId)
+  local identifiers = collectPlayerIdentifiers(playerId)
   local hwids = collectPlayerTokens(playerId)
 
   SetTimeout(0, function()

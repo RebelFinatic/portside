@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useRef, useMemo } from 'react';
 import { ArrowDown, Terminal, Copy, Command, Filter, Save, Bookmark } from 'lucide-react';
 import { apiFetch } from '../lib/api';
 import { useAuthStore } from '../store/useAuthStore';
@@ -173,6 +173,8 @@ export default function Console() {
   const outputRef = useRef<HTMLDivElement>(null);
   const endOfLogsRef = useRef<HTMLDivElement>(null);
   const shouldFollowTailRef = useRef(true);
+  const lastScrollHeightRef = useRef(0);
+  const programmaticScrollRef = useRef(false);
 
   const uniqueLevels = useMemo(() => {
     const levels = new Set(logs.map(l => l.level));
@@ -242,24 +244,62 @@ export default function Console() {
     return () => socket.close();
   }, [token]);
 
-  useEffect(() => {
-    if (!shouldFollowTailRef.current) return;
-    endOfLogsRef.current?.scrollIntoView({ behavior: 'auto' });
+  const scrollToLatest = (behavior: ScrollBehavior = 'auto') => {
+    programmaticScrollRef.current = true;
+    endOfLogsRef.current?.scrollIntoView({ behavior });
+    window.setTimeout(() => {
+      programmaticScrollRef.current = false;
+      const output = outputRef.current;
+      if (output) lastScrollHeightRef.current = output.scrollHeight;
+    }, behavior === 'smooth' ? 250 : 0);
+  };
+
+  const isViewingLatest = () => {
+    const output = outputRef.current;
+    const endOfLogs = endOfLogsRef.current;
+    if (!output || !endOfLogs) return false;
+
+    const distanceToLatest = endOfLogs.offsetTop - output.scrollTop - output.clientHeight;
+    return distanceToLatest <= 80;
+  };
+
+  useLayoutEffect(() => {
+    const output = outputRef.current;
+    if (!output) return;
+
+    if (shouldFollowTailRef.current) {
+      scrollToLatest('auto');
+      return;
+    }
+
+    lastScrollHeightRef.current = output.scrollHeight;
   }, [filteredLogs.length]);
 
   const handleOutputScroll = () => {
     const output = outputRef.current;
     if (!output) return;
-    const distanceFromBottom = output.scrollHeight - output.scrollTop - output.clientHeight;
-    const nextIsFollowingTail = distanceFromBottom < 48;
+
+    const scrollHeightChanged = output.scrollHeight !== lastScrollHeightRef.current;
+    if (scrollHeightChanged && shouldFollowTailRef.current) {
+      scrollToLatest('auto');
+      return;
+    }
+
+    if (programmaticScrollRef.current) {
+      lastScrollHeightRef.current = output.scrollHeight;
+      return;
+    }
+
+    const nextIsFollowingTail = isViewingLatest();
     shouldFollowTailRef.current = nextIsFollowingTail;
+    lastScrollHeightRef.current = output.scrollHeight;
     setIsFollowingTail(nextIsFollowingTail);
   };
 
   const jumpToLatest = () => {
     shouldFollowTailRef.current = true;
     setIsFollowingTail(true);
-    endOfLogsRef.current?.scrollIntoView({ behavior: 'smooth' });
+    scrollToLatest('smooth');
   };
 
   const savePreset = () => {
