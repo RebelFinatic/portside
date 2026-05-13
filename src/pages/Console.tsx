@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { Terminal, Copy, Command, Filter, Save, Bookmark } from 'lucide-react';
+import { ArrowDown, Terminal, Copy, Command, Filter, Save, Bookmark } from 'lucide-react';
 import { apiFetch } from '../lib/api';
 import { useAuthStore } from '../store/useAuthStore';
 import { toast } from 'sonner';
@@ -168,6 +168,7 @@ export default function Console() {
   ]);
   const [presetModalOpen, setPresetModalOpen] = useState(false);
   const [newPresetName, setNewPresetName] = useState('');
+  const [isFollowingTail, setIsFollowingTail] = useState(true);
 
   const outputRef = useRef<HTMLDivElement>(null);
   const endOfLogsRef = useRef<HTMLDivElement>(null);
@@ -250,7 +251,15 @@ export default function Console() {
     const output = outputRef.current;
     if (!output) return;
     const distanceFromBottom = output.scrollHeight - output.scrollTop - output.clientHeight;
-    shouldFollowTailRef.current = distanceFromBottom < 48;
+    const nextIsFollowingTail = distanceFromBottom < 48;
+    shouldFollowTailRef.current = nextIsFollowingTail;
+    setIsFollowingTail(nextIsFollowingTail);
+  };
+
+  const jumpToLatest = () => {
+    shouldFollowTailRef.current = true;
+    setIsFollowingTail(true);
+    endOfLogsRef.current?.scrollIntoView({ behavior: 'smooth' });
   };
 
   const savePreset = () => {
@@ -278,6 +287,7 @@ export default function Console() {
     
     const submittedCommand = input.trim();
     shouldFollowTailRef.current = true;
+    setIsFollowingTail(true);
     
     // Optimistic custom log to local array
     setLogs(prev => [...prev, {
@@ -434,21 +444,34 @@ export default function Console() {
         </div>
 
         {/* Output Area */}
-        <div
-          ref={outputRef}
-          onScroll={handleOutputScroll}
-          className="flex-1 overflow-y-auto p-4 font-mono text-[11px] leading-relaxed bg-black/40"
-        >
-          {filteredLogs.map((log) => (
-            <div key={log.id} className="flex gap-4 hover:bg-zinc-900/50 px-2 py-0.5 rounded transition-colors group">
-              <span className="text-zinc-500 shrink-0">[{format(new Date(log.timestamp), 'HH:mm:ss')}]</span>
-              <span className={`w-16 shrink-0 font-bold ${getLevelColor(log.level)}`}>{log.level}</span>
-              <span className="text-zinc-500 w-20 shrink-0 truncate">[{log.source}]</span>
-              <ConsoleMessage message={log.message} />
-            </div>
-          ))}
-          <div className="text-zinc-500 text-white animate-pulse mt-2 px-2">_</div>
-          <div ref={endOfLogsRef} />
+        <div className="relative flex-1 min-h-0 bg-black/40">
+          {!isFollowingTail && (
+            <button
+              type="button"
+              onClick={jumpToLatest}
+              className="absolute bottom-3 right-4 z-10 flex items-center gap-2 rounded border border-orange-500/40 bg-orange-600 px-3 py-1.5 text-[10px] font-bold uppercase tracking-widest text-white shadow-lg shadow-black/40 transition-colors hover:bg-orange-500"
+            >
+              <ArrowDown className="h-3.5 w-3.5" />
+              Latest
+            </button>
+          )}
+          <div
+            ref={outputRef}
+            onScroll={handleOutputScroll}
+            className="absolute inset-0 overflow-y-auto p-4 font-mono text-[11px] leading-relaxed"
+          >
+            {filteredLogs.map((log) => (
+              <div key={log.id} className="flex gap-4 hover:bg-zinc-900/50 px-2 py-0.5 rounded transition-colors group">
+                <span className="text-zinc-500 shrink-0">[{format(new Date(log.timestamp), 'HH:mm:ss')}]</span>
+                <span className={`w-16 shrink-0 font-bold ${getLevelColor(log.level)}`}>{log.level}</span>
+                <span className="text-zinc-500 w-20 shrink-0 truncate">[{log.source}]</span>
+                <ConsoleMessage message={log.message} />
+              </div>
+            ))}
+            <div className="text-zinc-500 text-white animate-pulse mt-2 px-2">_</div>
+            <div ref={endOfLogsRef} />
+            <div className="h-10" />
+          </div>
         </div>
 
         {/* Input Form */}

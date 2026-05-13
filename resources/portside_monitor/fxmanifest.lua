@@ -3,7 +3,7 @@ game { 'gta5', 'rdr3' }
 
 author 'Portside'
 description 'Portside monitor bridge for resource reports, player snapshots, and txAdmin-compatible events.'
-version '0.1.3'
+version '0.1.4'
 
 lua54 'yes'
 
