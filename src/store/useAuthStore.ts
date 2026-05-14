@@ -9,7 +9,7 @@ interface User {
   isOwner: boolean;
 }
 
-interface AuthState {
+export interface AuthState {
   token: string | null;
   user: User | null;
   isAuthenticated: boolean;
@@ -20,7 +20,7 @@ interface AuthState {
 
 const isDebug = (import.meta as any).env?.VITE_DEBUG === 'true';
 
-export const useAuthStore = create<AuthState>((set) => ({
+export const useAuthStore = create<AuthState>((set, get) => ({
   token: isDebug ? 'debug-token' : localStorage.getItem('portside_token'),
   user: isDebug ? {
     id: 'debug-admin',
@@ -32,7 +32,7 @@ export const useAuthStore = create<AuthState>((set) => ({
   } : null,
   isAuthenticated: isDebug || !!localStorage.getItem('portside_token'),
   hasPermission: (permission) => {
-    const user = useAuthStore.getState().user;
+    const user = get().user;
     if (!user) return false;
     return user.permissions.includes('all_permissions') || user.permissions.includes(permission);
   },

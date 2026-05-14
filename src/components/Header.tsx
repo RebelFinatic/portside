@@ -2,7 +2,7 @@ import { useAuthStore } from '../store/useAuthStore';
 import { apiFetch } from '../lib/api';
 
 export default function Header() {
-  const { user, logout } = useAuthStore();
+  const { logout } = useAuthStore();
 
   const handleLogout = async () => {
     try {

@@ -5,7 +5,6 @@ import { toast } from 'sonner';
 
 export default function Database() {
   const [tables, setTables] = useState<string[]>([]);
-  const [loading, setLoading] = useState(true);
   const [searchTable, setSearchTable] = useState('');
   
   const [query, setQuery] = useState('');
@@ -22,8 +21,6 @@ export default function Database() {
       setTables(data.tables || []);
     } catch {
       // Fallback
-    } finally {
-      setLoading(false);
     }
   };
 
