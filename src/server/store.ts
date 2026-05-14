@@ -13,6 +13,15 @@ const normalizeWarningMinutes = (minutes: unknown = [30, 15, 10, 5, 4, 3, 2, 1])
     .sort((a, b) => b - a);
 };
 
+const secretKeyPattern = /(password|secret|token|license|connection|string|key)/i;
+
+const redactRecord = (input: Record<string, unknown>) => Object.fromEntries(
+  Object.entries(input || {}).map(([key, value]) => [
+    key,
+    secretKeyPattern.test(key) && value ? `[redacted:${String(value).length}]` : value,
+  ])
+);
+
 export interface RoleRecord {
   id: string;
   name: string;
@@ -132,6 +141,54 @@ export interface DiscordStatusSettingsRecord {
   statusMessageId: string | null;
   updateIntervalSeconds: number;
   updatedAt: string;
+}
+
+export interface RecipeCatalogEntryRecord {
+  id: string;
+  name: string;
+  source: string;
+  tags: string[];
+  description: string | null;
+  url: string;
+  engine: number | null;
+  updatedAt: string;
+}
+
+export interface DeployerJobRecord {
+  id: string;
+  status: string;
+  recipeName: string;
+  recipeUrl: string | null;
+  targetPath: string;
+  variables: Record<string, unknown>;
+  recipeRaw: string;
+  metadata: Record<string, unknown>;
+  validation: Record<string, unknown> | null;
+  createdAt: string;
+  updatedAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  error: string | null;
+}
+
+export interface DeployerStepRecord {
+  id: string;
+  jobId: string;
+  stepIndex: number;
+  label: string;
+  action: string;
+  status: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  error: string | null;
+}
+
+export interface DeployerLogRecord {
+  id: string;
+  jobId: string;
+  timestamp: string;
+  level: string;
+  message: string;
 }
 
 export class PortsideStore {
@@ -408,6 +465,57 @@ export class PortsideStore {
         status_message_id TEXT,
         update_interval_seconds INTEGER NOT NULL DEFAULT 60,
         updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS recipe_catalog_entries (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        source TEXT NOT NULL,
+        tags TEXT,
+        description TEXT,
+        url TEXT NOT NULL UNIQUE,
+        engine INTEGER,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS deployer_jobs (
+        id TEXT PRIMARY KEY,
+        status TEXT NOT NULL,
+        recipe_name TEXT NOT NULL,
+        recipe_url TEXT,
+        target_path TEXT NOT NULL,
+        variables TEXT,
+        recipe_raw TEXT NOT NULL,
+        metadata TEXT,
+        validation TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        started_at TEXT,
+        finished_at TEXT,
+        error TEXT
+      );
+
+      CREATE TABLE IF NOT EXISTS deployer_steps (
+        id TEXT PRIMARY KEY,
+        job_id TEXT NOT NULL,
+        step_index INTEGER NOT NULL,
+        label TEXT NOT NULL,
+        action TEXT NOT NULL,
+        status TEXT NOT NULL,
+        started_at TEXT,
+        finished_at TEXT,
+        error TEXT,
+        UNIQUE(job_id, step_index),
+        FOREIGN KEY (job_id) REFERENCES deployer_jobs(id) ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS deployer_logs (
+        id TEXT PRIMARY KEY,
+        job_id TEXT NOT NULL,
+        timestamp TEXT NOT NULL,
+        level TEXT NOT NULL,
+        message TEXT NOT NULL,
+        FOREIGN KEY (job_id) REFERENCES deployer_jobs(id) ON DELETE CASCADE
       );
     `);
 
@@ -937,6 +1045,215 @@ export class PortsideStore {
       timestamp
     );
     return this.getDiscordStatusSettings();
+  }
+
+  private mapRecipeCatalogEntry(row: any): RecipeCatalogEntryRecord {
+    return {
+      id: row.id,
+      name: row.name,
+      source: row.source,
+      tags: row.tags ? JSON.parse(row.tags) : [],
+      description: row.description,
+      url: row.url,
+      engine: row.engine,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  upsertRecipeCatalog(entries: Array<Omit<RecipeCatalogEntryRecord, 'updatedAt'>>) {
+    const timestamp = now();
+    const write = this.db.transaction(() => {
+      const insert = this.db.prepare(`
+        INSERT INTO recipe_catalog_entries (id, name, source, tags, description, url, engine, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(url) DO UPDATE SET
+          id = excluded.id,
+          name = excluded.name,
+          source = excluded.source,
+          tags = excluded.tags,
+          description = excluded.description,
+          url = excluded.url,
+          engine = excluded.engine,
+          updated_at = excluded.updated_at
+      `);
+      entries.forEach(entry => insert.run(
+        entry.id,
+        entry.name,
+        entry.source,
+        JSON.stringify(entry.tags || []),
+        entry.description || null,
+        entry.url,
+        entry.engine,
+        timestamp
+      ));
+    });
+    write();
+    return this.listRecipeCatalog();
+  }
+
+  listRecipeCatalog(): RecipeCatalogEntryRecord[] {
+    const rows = this.db.prepare(`
+      SELECT id, name, source, tags, description, url, engine, updated_at
+      FROM recipe_catalog_entries
+      ORDER BY CASE source WHEN 'portside' THEN 0 WHEN 'txadmin' THEN 1 ELSE 2 END, name ASC
+    `).all() as any[];
+    return rows.map(row => this.mapRecipeCatalogEntry(row));
+  }
+
+  getRecipeCatalogEntry(id: string) {
+    const row = this.db.prepare(`
+      SELECT id, name, source, tags, description, url, engine, updated_at
+      FROM recipe_catalog_entries
+      WHERE id = ?
+    `).get(id) as any;
+    return row ? this.mapRecipeCatalogEntry(row) : null;
+  }
+
+  private mapDeployerJob(row: any): DeployerJobRecord {
+    return {
+      id: row.id,
+      status: row.status,
+      recipeName: row.recipe_name,
+      recipeUrl: row.recipe_url,
+      targetPath: row.target_path,
+      variables: row.variables ? JSON.parse(row.variables) : {},
+      recipeRaw: row.recipe_raw,
+      metadata: row.metadata ? JSON.parse(row.metadata) : {},
+      validation: row.validation ? JSON.parse(row.validation) : null,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      startedAt: row.started_at,
+      finishedAt: row.finished_at,
+      error: row.error,
+    };
+  }
+
+  createDeployerJob(input: {
+    recipeName: string;
+    recipeUrl?: string | null;
+    targetPath: string;
+    variables: Record<string, unknown>;
+    recipeRaw: string;
+    metadata: Record<string, unknown>;
+  }) {
+    const id = crypto.randomUUID();
+    const timestamp = now();
+    this.db.prepare(`
+      INSERT INTO deployer_jobs (id, status, recipe_name, recipe_url, target_path, variables, recipe_raw, metadata, created_at, updated_at)
+      VALUES (?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      id,
+      input.recipeName,
+      input.recipeUrl || null,
+      input.targetPath,
+      JSON.stringify(input.variables || {}),
+      input.recipeRaw,
+      JSON.stringify(input.metadata || {}),
+      timestamp,
+      timestamp
+    );
+    return this.getDeployerJob(id)!;
+  }
+
+  getDeployerJob(id: string, options?: { includeSecrets?: boolean }) {
+    const row = this.db.prepare('SELECT * FROM deployer_jobs WHERE id = ?').get(id) as any;
+    const job = row ? this.mapDeployerJob(row) : null;
+    if (!job || options?.includeSecrets) return job;
+    job.variables = redactRecord(job.variables);
+    job.recipeRaw = '';
+    return job;
+  }
+
+  listDeployerJobs(limit = 50) {
+    const rows = this.db.prepare('SELECT * FROM deployer_jobs ORDER BY created_at DESC LIMIT ?').all(limit) as any[];
+    return rows.map(row => {
+      const job = this.mapDeployerJob(row);
+      job.variables = redactRecord(job.variables);
+      job.recipeRaw = '';
+      return job;
+    });
+  }
+
+  updateDeployerJob(id: string, input: {
+    status?: string;
+    validation?: Record<string, unknown> | null;
+    startedAt?: string | null;
+    finishedAt?: string | null;
+    error?: string | null;
+  }) {
+    const existing = this.getDeployerJob(id, { includeSecrets: true });
+    if (!existing) return null;
+    this.db.prepare(`
+      UPDATE deployer_jobs
+      SET status = ?, validation = ?, started_at = ?, finished_at = ?, error = ?, updated_at = ?
+      WHERE id = ?
+    `).run(
+      input.status || existing.status,
+      input.validation === undefined ? (existing.validation ? JSON.stringify(existing.validation) : null) : (input.validation ? JSON.stringify(input.validation) : null),
+      input.startedAt === undefined ? existing.startedAt : input.startedAt,
+      input.finishedAt === undefined ? existing.finishedAt : input.finishedAt,
+      input.error === undefined ? existing.error : input.error,
+      now(),
+      id
+    );
+    return this.getDeployerJob(id);
+  }
+
+  createDeployerStep(input: {
+    jobId: string;
+    stepIndex: number;
+    label: string;
+    action: string;
+  }) {
+    const id = crypto.randomUUID();
+    this.db.prepare(`
+      INSERT INTO deployer_steps (id, job_id, step_index, label, action, status)
+      VALUES (?, ?, ?, ?, ?, 'pending')
+    `).run(id, input.jobId, input.stepIndex, input.label, input.action);
+    return id;
+  }
+
+  updateDeployerStep(id: string, input: { status: string; error?: string | null; startedAt?: string | null; finishedAt?: string | null }) {
+    const row = this.db.prepare('SELECT * FROM deployer_steps WHERE id = ?').get(id) as any;
+    if (!row) return null;
+    this.db.prepare(`
+      UPDATE deployer_steps
+      SET status = ?, started_at = ?, finished_at = ?, error = ?
+      WHERE id = ?
+    `).run(
+      input.status,
+      input.startedAt === undefined ? row.started_at : input.startedAt,
+      input.finishedAt === undefined ? row.finished_at : input.finishedAt,
+      input.error === undefined ? row.error : input.error,
+      id
+    );
+    return id;
+  }
+
+  listDeployerSteps(jobId: string): DeployerStepRecord[] {
+    const rows = this.db.prepare(`
+      SELECT id, job_id as jobId, step_index as stepIndex, label, action, status, started_at as startedAt, finished_at as finishedAt, error
+      FROM deployer_steps
+      WHERE job_id = ?
+      ORDER BY step_index ASC
+    `).all(jobId) as DeployerStepRecord[];
+    return rows;
+  }
+
+  addDeployerLog(jobId: string, level: string, message: string) {
+    this.db.prepare('INSERT INTO deployer_logs (id, job_id, timestamp, level, message) VALUES (?, ?, ?, ?, ?)')
+      .run(crypto.randomUUID(), jobId, now(), level, message);
+  }
+
+  listDeployerLogs(jobId: string, limit = 250): DeployerLogRecord[] {
+    const rows = this.db.prepare(`
+      SELECT id, job_id as jobId, timestamp, level, message
+      FROM deployer_logs
+      WHERE job_id = ?
+      ORDER BY timestamp ASC
+      LIMIT ?
+    `).all(jobId, limit) as DeployerLogRecord[];
+    return rows;
   }
 
   private mapRestartSchedule(row: any): RestartScheduleRecord {

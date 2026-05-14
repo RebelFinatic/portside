@@ -11,6 +11,7 @@ Portside is an open-source operations panel for FiveM servers. It gives server o
 - **Whitelist controls**: Approve identifiers, review requests, and optionally block unapproved joins through the monitor bridge.
 - **Discord status embed**: Optionally run a Discord bot that keeps a server status message updated.
 - **Diagnostics bundle**: Review runtime health and export redacted support data without exposing secrets.
+- **Recipe deployer**: Inspect and run txAdmin-compatible recipes from the official txAdmin catalog, Portside additions, custom URLs, or pasted YAML.
 - **Live console**: Read server output and execute console/RCON-style commands from the panel.
 - **Durable logs**: Persist admin, FXServer/RCON, and server activity logs under Portside's data path.
 - **Optional managed FXServer mode**: Start, stop, restart, supervise crashes, and schedule restarts when Portside is explicitly configured to own the FXServer process.
@@ -187,6 +188,18 @@ Dashboard CPU and memory values are sampled from the Portside Node process and h
 Admins with `settings.view` can open the Diagnostics page to inspect Portside runtime health, host details, FXServer lifecycle state, monitor heartbeat, Discord status, database explorer connectivity, log directory access, and redacted effective configuration values.
 
 The Download Bundle action exports a JSON support bundle with the same redacted health summary plus recent warning/error logs and failed or denied admin actions. Secret values such as JWT secrets, RCON passwords, monitor tokens, Discord tokens, host API tokens, database passwords, license keys, and Cfx keys are never included as plaintext.
+
+## Recipe Deployer
+
+Admins with `control.server` can open Recipe Deployer to deploy txAdmin-compatible server templates into a chosen server-data folder. Portside loads the current txAdmin popular recipe catalog from `citizenfx/txAdmin-recipes` and also includes an ND Framework entry that points to:
+
+```text
+https://raw.githubusercontent.com/ND-Framework/txadmin-recipe/main/nd-main.yaml
+```
+
+If GitHub is unavailable, Portside keeps a cached catalog in SQLite and falls back to bundled entries for FiveM Basic, RedM Basic, ESX Legacy, Qbox, QBCore, VORP Core, and ND Framework. The deployer can also inspect custom recipe URLs or pasted YAML.
+
+Recipe execution is intentionally jailed to the selected target folder and refuses filesystem roots or paths inside the Portside app directory. Deployer logs and API responses redact license keys, database passwords, tokens, connection strings, and similar secrets. Review recipe tasks before running them: supported actions can create, overwrite, move, remove, download, unzip, and run database setup inside the deployment flow.
 
 ## Managed FXServer Mode
 

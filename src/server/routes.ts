@@ -21,6 +21,7 @@ import type { FxServerManager } from './fxserver';
 import type { DiscordStatusService } from './discord';
 import { nextOccurrenceForSchedule } from './scheduler';
 import { collectDiagnostics, collectDiagnosticsBundle } from './diagnostics';
+import { ensureRecipeCatalog, inspectRecipe, refreshRecipeCatalog, runDeployerJob, serializeJob } from './deployer';
 import {
   createAuthMiddleware,
   createOwner,
@@ -612,6 +613,96 @@ export const registerApiRoutes = (
     res.setHeader('Content-Type', 'application/json');
     res.setHeader('Content-Disposition', `attachment; filename="portside-diagnostics-${timestamp}.json"`);
     res.send(JSON.stringify(bundle, null, 2));
+  });
+
+  app.get('/api/deployer/catalog', authenticateToken, requirePermission(store, 'control.server'), async (_req, res) => {
+    res.json({ recipes: await ensureRecipeCatalog(store) });
+  });
+
+  app.post('/api/deployer/catalog/refresh', authenticateToken, requirePermission(store, 'control.server'), async (req: AuthedRequest, res) => {
+    try {
+      const recipes = await refreshRecipeCatalog(store);
+      store.logAction({ ...actionActor(req), action: 'deployer.catalog.refresh', method: req.method, route: req.originalUrl, permission: 'control.server', status: 'success', details: { count: recipes.length } });
+      res.json({ recipes });
+    } catch (error: any) {
+      const recipes = await ensureRecipeCatalog(store);
+      store.logAction({ ...actionActor(req), action: 'deployer.catalog.refresh', method: req.method, route: req.originalUrl, permission: 'control.server', status: 'failed', details: { error: error.message } });
+      res.status(502).json({ error: error.message, recipes });
+    }
+  });
+
+  app.post('/api/deployer/recipes/inspect', authenticateToken, requirePermission(store, 'control.server'), async (req: AuthedRequest, res) => {
+    try {
+      const inspection = await inspectRecipe({
+        store,
+        catalogId: typeof req.body?.catalogId === 'string' ? req.body.catalogId : undefined,
+        url: typeof req.body?.url === 'string' ? req.body.url.trim() : undefined,
+        text: typeof req.body?.text === 'string' ? req.body.text : undefined,
+      });
+      res.json(inspection);
+    } catch (error: any) {
+      res.status(400).json({ error: error.message || 'Failed to inspect recipe' });
+    }
+  });
+
+  app.get('/api/deployer/jobs', authenticateToken, requirePermission(store, 'control.server'), (_req, res) => {
+    res.json({ jobs: store.listDeployerJobs() });
+  });
+
+  app.get('/api/deployer/jobs/:id', authenticateToken, requirePermission(store, 'control.server'), (req, res) => {
+    const job = store.getDeployerJob(req.params.id);
+    if (!job) return res.status(404).json({ error: 'Deployer job not found' });
+    res.json(serializeJob(store, job));
+  });
+
+  app.post('/api/deployer/jobs', authenticateToken, requirePermission(store, 'control.server'), async (req: AuthedRequest, res) => {
+    try {
+      const targetPath = typeof req.body?.targetPath === 'string' ? req.body.targetPath.trim() : '';
+      if (!targetPath) return res.status(400).json({ error: 'Target path is required' });
+      const inspection = await inspectRecipe({
+        store,
+        catalogId: typeof req.body?.catalogId === 'string' ? req.body.catalogId : undefined,
+        url: typeof req.body?.url === 'string' ? req.body.url.trim() : undefined,
+        text: typeof req.body?.text === 'string' ? req.body.text : undefined,
+      });
+      const confirmDestructive = req.body?.confirmDestructive === true;
+      if (inspection.tasks.some(task => task.action === 'remove_path') && !confirmDestructive) {
+        return res.status(400).json({ error: 'This recipe contains destructive tasks. Confirmation is required before creating a job.' });
+      }
+      const job = store.createDeployerJob({
+        recipeName: String(inspection.metadata.name || 'Custom recipe'),
+        recipeUrl: typeof inspection.metadata.recipeUrl === 'string' ? inspection.metadata.recipeUrl : null,
+        targetPath,
+        variables: typeof req.body?.variables === 'object' && req.body.variables ? req.body.variables : {},
+        recipeRaw: inspection.recipeRaw,
+        metadata: { ...inspection.metadata, confirmDestructive },
+      });
+      store.logAction({ ...actionActor(req), action: 'deployer.job.create', method: req.method, route: req.originalUrl, permission: 'control.server', status: 'success', details: { jobId: job.id, recipeName: job.recipeName } });
+      res.status(201).json(serializeJob(store, job));
+    } catch (error: any) {
+      res.status(400).json({ error: error.message || 'Failed to create deployer job' });
+    }
+  });
+
+  app.post('/api/deployer/jobs/:id/run', authenticateToken, requirePermission(store, 'control.server'), async (req: AuthedRequest, res) => {
+    try {
+      const job = await runDeployerJob(store, req.params.id);
+      store.logAction({ ...actionActor(req), action: 'deployer.job.run', method: req.method, route: req.originalUrl, permission: 'control.server', status: job.status === 'success' ? 'success' : 'failed', details: { jobId: job.id, status: job.status } });
+      res.json(serializeJob(store, job));
+    } catch (error: any) {
+      store.logAction({ ...actionActor(req), action: 'deployer.job.run', method: req.method, route: req.originalUrl, permission: 'control.server', status: 'failed', details: { jobId: req.params.id, error: error.message } });
+      res.status(400).json({ error: error.message || 'Failed to run deployer job' });
+    }
+  });
+
+  app.post('/api/deployer/jobs/:id/cancel', authenticateToken, requirePermission(store, 'control.server'), (req: AuthedRequest, res) => {
+    const job = store.getDeployerJob(req.params.id);
+    if (!job) return res.status(404).json({ error: 'Deployer job not found' });
+    if (job.status !== 'pending') return res.status(400).json({ error: 'Only pending jobs can be cancelled' });
+    const cancelled = store.updateDeployerJob(job.id, { status: 'cancelled', finishedAt: new Date().toISOString() });
+    store.addDeployerLog(job.id, 'WARN', `Cancelled by ${req.user?.username || 'admin'}`);
+    store.logAction({ ...actionActor(req), action: 'deployer.job.cancel', method: req.method, route: req.originalUrl, permission: 'control.server', status: 'success', details: { jobId: job.id } });
+    res.json(cancelled ? serializeJob(store, cancelled) : null);
   });
 
   const normalizeWarnings = (value: unknown) => (
