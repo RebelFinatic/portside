@@ -1,8 +1,12 @@
 import { useAuthStore } from '../store/useAuthStore';
 import { apiFetch } from '../lib/api';
+import { toast } from 'sonner';
+import { useState } from 'react';
 
 export default function Header() {
-  const { logout } = useAuthStore();
+  const { logout, hasPermission } = useAuthStore();
+  const [restarting, setRestarting] = useState(false);
+  const canControlServer = hasPermission('control.server');
 
   const handleLogout = async () => {
     try {
@@ -11,6 +15,28 @@ export default function Header() {
       // Local logout still clears stale or expired sessions.
     } finally {
       logout();
+    }
+  };
+
+  const handleRestart = async () => {
+    if (restarting) return;
+    const confirmed = window.confirm('Restart the managed FXServer now?');
+    if (!confirmed) return;
+
+    setRestarting(true);
+    try {
+      await apiFetch('/server/control/restart', {
+        method: 'POST',
+        body: JSON.stringify({
+          reason: 'Restarted from Portside navbar',
+          message: 'Server restarting from Portside',
+        }),
+      });
+      toast.success('Restart requested');
+    } catch (error: any) {
+      toast.error('Restart failed', { description: error.message });
+    } finally {
+      setRestarting(false);
     }
   };
 
@@ -30,7 +56,15 @@ export default function Header() {
             <span className="text-sm font-semibold text-white">Online</span>
           </div>
         </div>
-        <button className="px-4 py-1.5 bg-zinc-800 text-white rounded text-xs font-bold border border-zinc-700 transition-colors hover:bg-zinc-700">RESTART</button>
+        {canControlServer && (
+          <button
+            onClick={handleRestart}
+            disabled={restarting}
+            className="px-4 py-1.5 bg-zinc-800 text-white rounded text-xs font-bold border border-zinc-700 transition-colors hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {restarting ? 'RESTARTING' : 'RESTART'}
+          </button>
+        )}
         <button onClick={handleLogout} className="px-4 py-1.5 bg-red-600/20 text-red-500 rounded text-xs font-bold border border-red-600/30 transition-colors hover:bg-red-600/30">LOGOUT</button>
       </div>
     </header>
