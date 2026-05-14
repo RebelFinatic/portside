@@ -10,6 +10,7 @@ Portside is an open-source operations panel for FiveM servers. It gives server o
 - **In-game admin menu**: Open a permission-aware Portside menu in FiveM for core moderation actions.
 - **Whitelist controls**: Approve identifiers, review requests, and optionally block unapproved joins through the monitor bridge.
 - **Discord status embed**: Optionally run a Discord bot that keeps a server status message updated.
+- **Diagnostics bundle**: Review runtime health and export redacted support data without exposing secrets.
 - **Live console**: Read server output and execute console/RCON-style commands from the panel.
 - **Durable logs**: Persist admin, FXServer/RCON, and server activity logs under Portside's data path.
 - **Optional managed FXServer mode**: Start, stop, restart, supervise crashes, and schedule restarts when Portside is explicitly configured to own the FXServer process.
@@ -180,6 +181,12 @@ Portside writes durable operational logs to `PORTSIDE_DATA_PATH/logs`:
 The Logs page can search recent entries and download daily log files. `PORTSIDE_LOG_RETENTION_DAYS` controls simple cleanup of old log files and defaults to 14 days.
 
 Dashboard CPU and memory values are sampled from the Portside Node process and host instead of generated demo numbers. The host status endpoint is available at `/host/status` and requires `PORTSIDE_HOST_API_TOKEN` or the compatibility alias `TXHOST_API_TOKEN` via `x-portside-envtoken`, `x-txadmin-envtoken`, or `?token=`.
+
+## Diagnostics
+
+Admins with `settings.view` can open the Diagnostics page to inspect Portside runtime health, host details, FXServer lifecycle state, monitor heartbeat, Discord status, database explorer connectivity, log directory access, and redacted effective configuration values.
+
+The Download Bundle action exports a JSON support bundle with the same redacted health summary plus recent warning/error logs and failed or denied admin actions. Secret values such as JWT secrets, RCON passwords, monitor tokens, Discord tokens, host API tokens, database passwords, license keys, and Cfx keys are never included as plaintext.
 
 ## Managed FXServer Mode
 

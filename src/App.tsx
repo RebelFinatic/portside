@@ -16,6 +16,7 @@ import Configuration from './pages/Configuration';
 import Roles from './pages/Roles';
 import Logs from './pages/Logs';
 import Whitelist from './pages/Whitelist';
+import Diagnostics from './pages/Diagnostics';
 import Layout from './components/Layout';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
@@ -59,6 +60,7 @@ export default function App() {
             <Route path="roles" element={<Roles />} />
             <Route path="logs" element={<Logs />} />
             <Route path="whitelist" element={<Whitelist />} />
+            <Route path="diagnostics" element={<Diagnostics />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Route>
         </Routes>

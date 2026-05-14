@@ -20,6 +20,7 @@ import type { RealtimeHub } from './realtime';
 import type { FxServerManager } from './fxserver';
 import type { DiscordStatusService } from './discord';
 import { nextOccurrenceForSchedule } from './scheduler';
+import { collectDiagnostics, collectDiagnosticsBundle } from './diagnostics';
 import {
   createAuthMiddleware,
   createOwner,
@@ -599,6 +600,18 @@ export const registerApiRoutes = (
         version: status.version,
       },
     });
+  });
+
+  app.get('/api/diagnostics', authenticateToken, requirePermission(store, 'settings.view'), async (_req, res) => {
+    res.json(await collectDiagnostics({ store, logger, fxServer, discordStatus, dbPool }));
+  });
+
+  app.get('/api/diagnostics/bundle', authenticateToken, requirePermission(store, 'settings.view'), async (_req, res) => {
+    const bundle = await collectDiagnosticsBundle({ store, logger, fxServer, discordStatus, dbPool });
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    res.setHeader('Content-Type', 'application/json');
+    res.setHeader('Content-Disposition', `attachment; filename="portside-diagnostics-${timestamp}.json"`);
+    res.send(JSON.stringify(bundle, null, 2));
   });
 
   const normalizeWarnings = (value: unknown) => (

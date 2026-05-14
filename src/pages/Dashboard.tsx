@@ -128,6 +128,7 @@ export default function Dashboard() {
   const [scheduleMessage, setScheduleMessage] = useState('Scheduled restart by Portside');
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const hasServerControl = useAuthStore(state => state.hasPermission('control.server'));
+  const hasSettingsView = useAuthStore(state => state.hasPermission('settings.view'));
 
   const fetchDashboard = async ({ silent = false } = {}) => {
     if (!silent) setRefreshing(true);
@@ -510,6 +511,7 @@ export default function Dashboard() {
           <QuickAction to="/resources" icon={<Server className="h-4 w-4" />} title="Control Resources" description="Start, stop, and restart scripts." />
           <QuickAction to="/settings" icon={<FileCode2 className="h-4 w-4" />} title="Edit server.cfg" description="Update the active FiveM config file." />
           <QuickAction to="/database" icon={<Database className="h-4 w-4" />} title="Explore Database" description="Inspect tables and run admin queries." />
+          {hasSettingsView && <QuickAction to="/diagnostics" icon={<Activity className="h-4 w-4" />} title="Diagnostics" description="Check runtime health and export a support bundle." />}
         </div>
       </Panel>
     </div>

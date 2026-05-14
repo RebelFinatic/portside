@@ -1,5 +1,5 @@
 import { NavLink } from 'react-router-dom';
-import { LayoutDashboard, Users, TerminalSquare, Database, FileCode2, Settings, ShieldCheck, FileText, BadgeCheck } from 'lucide-react';
+import { Activity, LayoutDashboard, Users, TerminalSquare, Database, FileCode2, Settings, ShieldCheck, FileText, BadgeCheck } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { useAuthStore } from '../store/useAuthStore';
 
@@ -14,6 +14,7 @@ const navigation = [
 const infrastructure = [
   { name: 'Dashboard', to: '/', icon: LayoutDashboard },
   { name: 'MariaDB Explorer', to: '/database', icon: Database, permission: 'database.read' },
+  { name: 'Diagnostics', to: '/diagnostics', icon: Activity, permission: 'settings.view' },
 ];
 
 export default function Sidebar() {
