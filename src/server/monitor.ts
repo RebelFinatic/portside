@@ -2,7 +2,7 @@ import type { Request, Response, NextFunction } from 'express';
 import type { MemoryLogger } from './logging';
 import type { PortsideStore } from './store';
 
-export const MONITOR_VERSION = '0.1.8';
+export const MONITOR_VERSION = '0.1.10';
 
 const allowedRelayEvents = new Set([
   'announcement',

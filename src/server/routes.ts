@@ -1,9 +1,10 @@
 import type { Express, Response } from 'express';
 import path from 'path';
+import { readFileSync } from 'fs';
 import mysql from 'mysql2/promise';
 import bcrypt from 'bcryptjs';
 import { PERMISSIONS } from './permissions';
-import type { PortsideStore } from './store';
+import type { OnboardingDeploymentSource, OnboardingMilestone, PortsideStore } from './store';
 import type { LogFamily, MemoryLogger } from './logging';
 import type { AuthedRequest } from './types';
 import { sampleRuntimeMetrics } from './metrics';
@@ -21,10 +22,24 @@ import type { FxServerManager } from './fxserver';
 import type { DiscordStatusService } from './discord';
 import { nextOccurrenceForSchedule } from './scheduler';
 import { collectDiagnostics, collectDiagnosticsBundle } from './diagnostics';
-import { ensureRecipeCatalog, inspectRecipe, refreshRecipeCatalog, runDeployerJob, serializeJob } from './deployer';
+import {
+  applyDeployerPlan,
+  createDeployerPlan,
+  ensureRecipeCatalog,
+  getGoLiveChecks,
+  inspectRecipe,
+  refreshRecipeCatalog,
+  retryDeployerJob,
+  runDeployerJob,
+  serializeJob,
+  serializePlan,
+  validateExistingServerData,
+} from './deployer';
+import { getUpdateChangelog, getUpdateStatus, refreshUpdatesWithFallback } from './updates';
 import {
   createAuthMiddleware,
   createOwner,
+  createOwnerSession,
   login,
   logout,
   requirePermission,
@@ -69,6 +84,15 @@ const hasHostToken = (req: AuthedRequest) => {
 };
 
 type RelayMonitorEvent = (eventName: string, payload: Record<string, unknown>) => Promise<boolean>;
+
+const readPackageVersion = () => {
+  try {
+    const packageJson = JSON.parse(readFileSync(path.join(process.cwd(), 'package.json'), 'utf8')) as { version?: string };
+    return packageJson.version || 'unknown';
+  } catch {
+    return 'unknown';
+  }
+};
 
 export const registerApiRoutes = (
   app: Express,
@@ -460,6 +484,39 @@ export const registerApiRoutes = (
     });
   });
 
+  app.get('/api/setup/wizard/state', (_req: AuthedRequest, res) => {
+    const setupRequired = !store.hasOwner();
+    res.json({
+      setupRequired,
+      hasOwner: !setupRequired,
+      defaultTargetPath: store.getDefaultDeployerTargetPath(),
+    });
+  });
+
+  app.post('/api/setup/wizard/owner', (req, res) => {
+    createOwnerSession(store, {
+      username: typeof req.body?.username === 'string' ? req.body.username.trim() : '',
+      password: typeof req.body?.password === 'string' ? req.body.password : '',
+      method: req.method,
+      route: req.originalUrl,
+      ip: req.ip || 'unknown',
+    }).then(result => {
+      if ('error' in result) return res.status(result.status ?? 400).json({ error: result.error });
+      store.upsertOnboardingState(result.payload.adminId, {
+        milestone: 'account_created',
+        milestoneTimestamp: new Date().toISOString(),
+      });
+      res.status(201).json({
+        token: result.payload.token,
+        user: result.payload.user,
+        onboarding: store.getOnboardingState(result.payload.adminId),
+      });
+    }).catch((error: any) => {
+      logger.add('ERROR', `Setup wizard owner error: ${error.message}`, 'auth', 'admin');
+      res.status(500).json({ error: 'Failed to create owner admin' });
+    });
+  });
+
   app.post('/api/auth/login', (req, res) => {
     login(store, req, res).catch(error => {
       logger.add('ERROR', `Login error: ${error.message}`, 'auth', 'admin');
@@ -471,6 +528,115 @@ export const registerApiRoutes = (
 
   app.get('/api/auth/verify', authenticateToken, (req: AuthedRequest, res) => {
     res.json({ user: sanitizeUser(req.user!) });
+  });
+
+  app.get('/api/onboarding/state', authenticateToken, requirePermission(store, 'control.server'), (req: AuthedRequest, res) => {
+    const adminId = req.user?.id;
+    if (!adminId) return res.status(401).json({ error: 'Unauthorized' });
+    res.json(store.getOnboardingState(adminId));
+  });
+
+  app.put('/api/onboarding/state', authenticateToken, requirePermission(store, 'control.server'), (req: AuthedRequest, res) => {
+    const adminId = req.user?.id;
+    if (!adminId) return res.status(401).json({ error: 'Unauthorized' });
+
+    const allowedMilestones = new Set([
+      'account_created',
+      'environment_checked',
+      'recipe_selected',
+      'variables_completed',
+      'deployment_planned',
+      'deployment_applied',
+      'go_live_ready',
+    ]);
+    const milestone = typeof req.body?.milestone === 'string' ? req.body.milestone : undefined;
+    const deploymentSource = typeof req.body?.deploymentSource === 'string' ? req.body.deploymentSource : undefined;
+    const attachedTargetPath = typeof req.body?.attachedTargetPath === 'string' ? req.body.attachedTargetPath.trim() : undefined;
+    if (milestone && !allowedMilestones.has(milestone)) {
+      return res.status(400).json({ error: 'Invalid onboarding milestone' });
+    }
+    if (deploymentSource && !new Set(['catalog', 'existing-data', 'remote-url', 'custom-yaml']).has(deploymentSource)) {
+      return res.status(400).json({ error: 'Invalid deployment source' });
+    }
+
+    const completed = req.body?.completed === true;
+    const skipped = req.body?.skipped === true;
+    const state = store.upsertOnboardingState(adminId, {
+      milestone: milestone as OnboardingMilestone | undefined,
+      deploymentSource: deploymentSource as OnboardingDeploymentSource | undefined,
+      attachedTargetPath: attachedTargetPath === undefined ? undefined : (attachedTargetPath || null),
+      completed: req.body?.completed === undefined ? undefined : completed,
+      skipped: req.body?.skipped === undefined ? undefined : skipped,
+      completedAt: req.body?.completed === undefined ? undefined : (completed ? new Date().toISOString() : null),
+      skippedAt: req.body?.skipped === undefined ? undefined : (skipped ? new Date().toISOString() : null),
+      milestoneTimestamp: milestone ? new Date().toISOString() : undefined,
+    });
+
+    store.logAction({
+      ...actionActor(req),
+      action: 'onboarding.state.update',
+      method: req.method,
+      route: req.originalUrl,
+      permission: 'control.server',
+      status: 'success',
+      details: { milestone, deploymentSource, attachedTargetPath: attachedTargetPath ? '[redacted]' : null, completed, skipped },
+    });
+    res.json(state);
+  });
+
+  app.post('/api/setup/wizard/existing-data/validate', authenticateToken, requirePermission(store, 'control.server'), async (req: AuthedRequest, res) => {
+    const targetPath = typeof req.body?.targetPath === 'string' ? req.body.targetPath.trim() : '';
+    if (!targetPath) return res.status(400).json({ error: 'Target path is required' });
+    try {
+      const validation = await validateExistingServerData(targetPath);
+      if (validation.ok) {
+        store.setDefaultDeployerTargetPath(validation.targetPath);
+      }
+      store.logAction({
+        ...actionActor(req),
+        action: 'setup.existing_data.validate',
+        method: req.method,
+        route: req.originalUrl,
+        permission: 'control.server',
+        status: validation.ok ? 'success' : 'failed',
+        details: { ok: validation.ok, targetPath: '[redacted]', checks: validation.checks, warnings: validation.warnings },
+      });
+      res.json({ ...validation, defaultTargetPath: store.getDefaultDeployerTargetPath() });
+    } catch (error: any) {
+      store.logAction({
+        ...actionActor(req),
+        action: 'setup.existing_data.validate',
+        method: req.method,
+        route: req.originalUrl,
+        permission: 'control.server',
+        status: 'failed',
+        details: { error: error.message, targetPath: '[redacted]' },
+      });
+      res.status(400).json({ error: error.message || 'Failed to validate target path' });
+    }
+  });
+
+  app.post('/api/setup/wizard/complete', authenticateToken, requirePermission(store, 'control.server'), (req: AuthedRequest, res) => {
+    const adminId = req.user?.id;
+    if (!adminId) return res.status(401).json({ error: 'Unauthorized' });
+    const targetPath = typeof req.body?.targetPath === 'string' ? req.body.targetPath.trim() : '';
+    if (targetPath) store.setDefaultDeployerTargetPath(targetPath);
+    const state = store.upsertOnboardingState(adminId, {
+      milestone: 'go_live_ready',
+      completed: true,
+      completedAt: new Date().toISOString(),
+      milestoneTimestamp: new Date().toISOString(),
+    });
+    store.logAction({
+      ...actionActor(req),
+      action: 'setup.wizard.complete',
+      method: req.method,
+      route: req.originalUrl,
+      permission: 'control.server',
+      status: 'success',
+      details: { defaultTargetPath: targetPath ? '[redacted]' : null },
+    });
+    res.json(state);
   });
 
   app.get('/api/permissions', authenticateToken, requirePermission(store, 'manage.admins'), (_req, res) => {
@@ -615,19 +781,60 @@ export const registerApiRoutes = (
     res.send(JSON.stringify(bundle, null, 2));
   });
 
+  app.get('/api/updates/status', authenticateToken, requirePermission(store, 'settings.view'), (_req, res) => {
+    res.json(getUpdateStatus(store, readPackageVersion()));
+  });
+
+  app.get('/api/updates/changelog', authenticateToken, requirePermission(store, 'settings.view'), (_req, res) => {
+    res.json(getUpdateChangelog(store));
+  });
+
+  app.post('/api/updates/check', authenticateToken, requirePermission(store, 'settings.write'), async (req: AuthedRequest, res) => {
+    try {
+      const result = await refreshUpdatesWithFallback(store);
+      const status = getUpdateStatus(store, readPackageVersion());
+      store.logAction({
+        ...actionActor(req),
+        action: 'updates.check',
+        method: req.method,
+        route: req.originalUrl,
+        permission: 'settings.write',
+        status: result.stale ? 'failed' : 'success',
+        details: {
+          source: `${status.owner}/${status.repo}`,
+          latestVersion: status.latestVersion,
+          stale: result.stale,
+          fetchError: result.cache?.fetchError || null,
+        },
+      });
+      res.json({ ...status, stale: result.stale });
+    } catch (error: any) {
+      store.logAction({
+        ...actionActor(req),
+        action: 'updates.check',
+        method: req.method,
+        route: req.originalUrl,
+        permission: 'settings.write',
+        status: 'failed',
+        details: { error: error.message },
+      });
+      res.status(502).json({ error: error.message || 'Failed to refresh updates' });
+    }
+  });
+
   app.get('/api/deployer/catalog', authenticateToken, requirePermission(store, 'control.server'), async (_req, res) => {
-    res.json({ recipes: await ensureRecipeCatalog(store) });
+    res.json({ recipes: await ensureRecipeCatalog(store), defaultTargetPath: store.getDefaultDeployerTargetPath() });
   });
 
   app.post('/api/deployer/catalog/refresh', authenticateToken, requirePermission(store, 'control.server'), async (req: AuthedRequest, res) => {
     try {
       const recipes = await refreshRecipeCatalog(store);
       store.logAction({ ...actionActor(req), action: 'deployer.catalog.refresh', method: req.method, route: req.originalUrl, permission: 'control.server', status: 'success', details: { count: recipes.length } });
-      res.json({ recipes });
+      res.json({ recipes, defaultTargetPath: store.getDefaultDeployerTargetPath() });
     } catch (error: any) {
       const recipes = await ensureRecipeCatalog(store);
       store.logAction({ ...actionActor(req), action: 'deployer.catalog.refresh', method: req.method, route: req.originalUrl, permission: 'control.server', status: 'failed', details: { error: error.message } });
-      res.status(502).json({ error: error.message, recipes });
+      res.status(502).json({ error: error.message, recipes, defaultTargetPath: store.getDefaultDeployerTargetPath() });
     }
   });
 
@@ -642,6 +849,84 @@ export const registerApiRoutes = (
       res.json(inspection);
     } catch (error: any) {
       res.status(400).json({ error: error.message || 'Failed to inspect recipe' });
+    }
+  });
+
+  app.post('/api/deployer/plans', authenticateToken, requirePermission(store, 'control.server'), async (req: AuthedRequest, res) => {
+    try {
+      const targetPath = typeof req.body?.targetPath === 'string' ? req.body.targetPath.trim() : '';
+      if (!targetPath) return res.status(400).json({ error: 'Target path is required' });
+      const planned = await createDeployerPlan({
+        store,
+        catalogId: typeof req.body?.catalogId === 'string' ? req.body.catalogId : undefined,
+        url: typeof req.body?.url === 'string' ? req.body.url.trim() : undefined,
+        text: typeof req.body?.text === 'string' ? req.body.text : undefined,
+        targetPath,
+        variables: typeof req.body?.variables === 'object' && req.body.variables ? req.body.variables : {},
+        createdByAdminId: req.user?.id || null,
+        createdByUsername: req.user?.username || null,
+      });
+      store.logAction({
+        ...actionActor(req),
+        action: 'deployer.plan.create',
+        method: req.method,
+        route: req.originalUrl,
+        permission: 'control.server',
+        status: 'success',
+        details: { planId: planned.plan.id, recipeName: planned.plan.recipeName },
+      });
+      res.status(201).json(planned);
+    } catch (error: any) {
+      store.logAction({
+        ...actionActor(req),
+        action: 'deployer.plan.create',
+        method: req.method,
+        route: req.originalUrl,
+        permission: 'control.server',
+        status: 'failed',
+        details: { error: error.message },
+      });
+      res.status(400).json({ error: error.message || 'Failed to create deployer plan' });
+    }
+  });
+
+  app.get('/api/deployer/plans/:id', authenticateToken, requirePermission(store, 'control.server'), (req, res) => {
+    const plan = store.getDeployerPlan(req.params.id);
+    if (!plan) return res.status(404).json({ error: 'Deployer plan not found' });
+    res.json(serializePlan(store, plan));
+  });
+
+  app.post('/api/deployer/plans/:id/apply', authenticateToken, requirePermission(store, 'control.server'), async (req: AuthedRequest, res) => {
+    try {
+      const confirmationToken = typeof req.body?.confirmationToken === 'string' ? req.body.confirmationToken.trim() : '';
+      if (!confirmationToken) return res.status(400).json({ error: 'Confirmation token is required' });
+      const applied = await applyDeployerPlan({
+        store,
+        planId: req.params.id,
+        confirmationToken,
+        actorUsername: req.user?.username || null,
+      });
+      store.logAction({
+        ...actionActor(req),
+        action: 'deployer.plan.apply',
+        method: req.method,
+        route: req.originalUrl,
+        permission: 'control.server',
+        status: applied.job.status === 'success' ? 'success' : 'failed',
+        details: { planId: req.params.id, jobId: applied.job.id, status: applied.job.status },
+      });
+      res.json(applied);
+    } catch (error: any) {
+      store.logAction({
+        ...actionActor(req),
+        action: 'deployer.plan.apply',
+        method: req.method,
+        route: req.originalUrl,
+        permission: 'control.server',
+        status: 'failed',
+        details: { planId: req.params.id, error: error.message },
+      });
+      res.status(400).json({ error: error.message || 'Failed to apply deployer plan' });
     }
   });
 
@@ -695,14 +980,45 @@ export const registerApiRoutes = (
     }
   });
 
+  app.post('/api/deployer/jobs/:id/retry', authenticateToken, requirePermission(store, 'control.server'), async (req: AuthedRequest, res) => {
+    try {
+      const retried = await retryDeployerJob(store, req.params.id);
+      store.logAction({
+        ...actionActor(req),
+        action: 'deployer.job.retry',
+        method: req.method,
+        route: req.originalUrl,
+        permission: 'control.server',
+        status: retried.status === 'success' ? 'success' : 'failed',
+        details: { jobId: req.params.id, status: retried.status },
+      });
+      res.json(retried);
+    } catch (error: any) {
+      store.logAction({
+        ...actionActor(req),
+        action: 'deployer.job.retry',
+        method: req.method,
+        route: req.originalUrl,
+        permission: 'control.server',
+        status: 'failed',
+        details: { jobId: req.params.id, error: error.message },
+      });
+      res.status(400).json({ error: error.message || 'Failed to retry deployer job' });
+    }
+  });
+
   app.post('/api/deployer/jobs/:id/cancel', authenticateToken, requirePermission(store, 'control.server'), (req: AuthedRequest, res) => {
     const job = store.getDeployerJob(req.params.id);
     if (!job) return res.status(404).json({ error: 'Deployer job not found' });
-    if (job.status !== 'pending') return res.status(400).json({ error: 'Only pending jobs can be cancelled' });
+    if (!['pending', 'ready', 'planned'].includes(job.status)) return res.status(400).json({ error: 'Only queued jobs can be cancelled' });
     const cancelled = store.updateDeployerJob(job.id, { status: 'cancelled', finishedAt: new Date().toISOString() });
     store.addDeployerLog(job.id, 'WARN', `Cancelled by ${req.user?.username || 'admin'}`);
     store.logAction({ ...actionActor(req), action: 'deployer.job.cancel', method: req.method, route: req.originalUrl, permission: 'control.server', status: 'success', details: { jobId: job.id } });
     res.json(cancelled ? serializeJob(store, cancelled) : null);
+  });
+
+  app.get('/api/deployer/go-live-checks', authenticateToken, requirePermission(store, 'control.server'), async (_req, res) => {
+    res.json(await getGoLiveChecks({ store, fxServerStatus: fxServer.getStatus() as unknown as Record<string, unknown> }));
   });
 
   const normalizeWarnings = (value: unknown) => (

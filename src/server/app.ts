@@ -31,6 +31,9 @@ export async function startServer() {
   discordStatus.start();
 
   registerApiRoutes(app, store, logger, realtime, fxServer, relayMonitorEvent, discordStatus);
+  app.use('/api', (_req, res) => {
+    res.status(404).json({ error: 'API route not found' });
+  });
 
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({

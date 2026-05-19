@@ -84,6 +84,19 @@ export default function Deployer() {
     ].some(value => value.toLowerCase().includes(needle)));
   }, [catalog, query]);
 
+  const describeLoadError = (message: string) => {
+    if (message.includes('Unexpected non-API response')) {
+      return 'Session expired or server returned HTML instead of API JSON. Please sign in again and retry.';
+    }
+    if (message.includes('403') || message.toLowerCase().includes('forbidden') || message.toLowerCase().includes('permission')) {
+      return 'You do not have permission to access the deployer.';
+    }
+    if (message.includes('401') || message.toLowerCase().includes('unauthorized')) {
+      return 'Your session is no longer valid. Please sign in again.';
+    }
+    return message;
+  };
+
   const load = async () => {
     setLoading(true);
     try {
@@ -94,8 +107,11 @@ export default function Deployer() {
       setCatalog(catalogResponse.recipes || []);
       setJobs(jobResponse.jobs || []);
       setSelectedId((catalogResponse.recipes || [])[0]?.id || '');
+      if (!targetPath && typeof catalogResponse.defaultTargetPath === 'string') {
+        setTargetPath(catalogResponse.defaultTargetPath);
+      }
     } catch (error: any) {
-      toast.error('Failed to load deployer', { description: error.message });
+      toast.error('Failed to load deployer', { description: describeLoadError(error.message || 'Failed to load deployer') });
     } finally {
       setLoading(false);
     }

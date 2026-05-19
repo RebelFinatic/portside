@@ -185,22 +185,38 @@ export const logout = (store: PortsideStore, req: AuthedRequest, res: Response) 
 };
 
 export const createOwner = async (store: PortsideStore, req: Request, res: Response) => {
-  if (store.hasOwner()) return res.status(409).json({ error: 'Setup has already been completed' });
-
   const username = typeof req.body?.username === 'string' ? req.body.username.trim() : '';
   const password = typeof req.body?.password === 'string' ? req.body.password : '';
+  const result = await createOwnerSession(store, {
+    username,
+    password,
+    method: req.method,
+    route: req.originalUrl,
+    ip: requestIp(req),
+  });
+  if ('error' in result) {
+    return res.status(result.status ?? 400).json({ error: result.error });
+  }
+  res.status(201).json(result.payload);
+};
 
-  if (!/^[a-zA-Z0-9_.-]{3,40}$/.test(username)) {
-    return res.status(400).json({ error: 'Username must be 3-40 characters and use letters, numbers, dot, dash, or underscore' });
+export const createOwnerSession = async (
+  store: PortsideStore,
+  input: { username: string; password: string; method: string; route: string; ip: string },
+) => {
+  if (store.hasOwner()) return { status: 409, error: 'Setup has already been completed' } as const;
+
+  if (!/^[a-zA-Z0-9_.-]{3,40}$/.test(input.username)) {
+    return { status: 400, error: 'Username must be 3-40 characters and use letters, numbers, dot, dash, or underscore' } as const;
   }
 
-  if (password.length < 10) {
-    return res.status(400).json({ error: 'Password must be at least 10 characters' });
+  if (input.password.length < 10) {
+    return { status: 400, error: 'Password must be at least 10 characters' } as const;
   }
 
-  const passwordHash = await bcrypt.hash(password, 12);
-  const admin = store.createOwner(username, passwordHash);
-  if (!admin) return res.status(500).json({ error: 'Failed to create owner admin' });
+  const passwordHash = await bcrypt.hash(input.password, 12);
+  const admin = store.createOwner(input.username, passwordHash);
+  if (!admin) return { status: 500, error: 'Failed to create owner admin' } as const;
 
   const session = store.createSession(admin.id);
   const token = signSessionToken(session.id);
@@ -218,11 +234,13 @@ export const createOwner = async (store: PortsideStore, req: Request, res: Respo
     actorAdminId: admin.id,
     actorUsername: admin.username,
     action: 'setup.owner_created',
-    method: req.method,
-    route: req.originalUrl,
+    method: input.method,
+    route: input.route,
     status: 'success',
-    ip: requestIp(req),
+    ip: input.ip,
   });
 
-  res.status(201).json({ token, user: sanitizeUser(user) });
+  return {
+    payload: { token, user: sanitizeUser(user), adminId: admin.id },
+  } as const;
 };

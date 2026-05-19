@@ -18,7 +18,7 @@ export default function Login() {
       .then(data => {
         if (data.setupRequired) {
           setSetupRequired(true);
-          navigate('/setup');
+          navigate('/onboarding');
         }
       })
       .catch(() => {});
@@ -38,7 +38,7 @@ export default function Login() {
       navigate('/');
     } catch (error: any) {
       if (error.message?.includes('setup')) {
-        navigate('/setup');
+        navigate('/onboarding');
       } else {
         toast.error(error.message || 'Authentication failed');
       }
@@ -108,8 +108,8 @@ export default function Login() {
         </form>
 
         {setupRequired && (
-          <div className="mt-6 text-center text-xs text-zinc-500">
-            First-run setup is required. <Link to="/setup" className="text-orange-500 hover:text-orange-400">Create the owner admin</Link>
+        <div className="mt-6 text-center text-xs text-zinc-500">
+            First-run setup is required. <Link to="/onboarding" className="text-orange-500 hover:text-orange-400">Open setup wizard</Link>
           </div>
         )}
       </div>

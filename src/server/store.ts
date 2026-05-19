@@ -143,6 +143,38 @@ export interface DiscordStatusSettingsRecord {
   updatedAt: string;
 }
 
+export interface AppSettingRecord {
+  key: string;
+  value: Record<string, unknown>;
+  version: number;
+  updatedAt: string;
+}
+
+export interface UpdateReleaseRecord {
+  tagName: string;
+  name: string;
+  body: string;
+  htmlUrl: string;
+  publishedAt: string | null;
+  prerelease: boolean;
+}
+
+export interface UpdatesConfigRecord {
+  source: 'github-releases';
+  owner: string;
+  repo: string;
+}
+
+export interface UpdatesCacheRecord {
+  source: 'github-releases';
+  owner: string;
+  repo: string;
+  latestVersion: string | null;
+  checkedAt: string;
+  releases: UpdateReleaseRecord[];
+  fetchError: string | null;
+}
+
 export interface RecipeCatalogEntryRecord {
   id: string;
   name: string;
@@ -157,6 +189,7 @@ export interface RecipeCatalogEntryRecord {
 export interface DeployerJobRecord {
   id: string;
   status: string;
+  planId: string | null;
   recipeName: string;
   recipeUrl: string | null;
   targetPath: string;
@@ -164,6 +197,8 @@ export interface DeployerJobRecord {
   recipeRaw: string;
   metadata: Record<string, unknown>;
   validation: Record<string, unknown> | null;
+  resumeFromStep: number | null;
+  confirmationHash: string | null;
   createdAt: string;
   updatedAt: string;
   startedAt: string | null;
@@ -189,6 +224,64 @@ export interface DeployerLogRecord {
   timestamp: string;
   level: string;
   message: string;
+}
+
+export type OnboardingMilestone =
+  | 'account_created'
+  | 'environment_checked'
+  | 'recipe_selected'
+  | 'variables_completed'
+  | 'deployment_planned'
+  | 'deployment_applied'
+  | 'go_live_ready';
+
+export type OnboardingDeploymentSource = 'catalog' | 'existing-data' | 'remote-url' | 'custom-yaml';
+
+export interface OnboardingStateRecord {
+  adminId: string;
+  completed: boolean;
+  skipped: boolean;
+  milestone: OnboardingMilestone;
+  deploymentSource: OnboardingDeploymentSource | null;
+  attachedTargetPath: string | null;
+  defaultTargetPath: string | null;
+  milestones: Record<OnboardingMilestone, string | null>;
+  createdAt: string;
+  updatedAt: string;
+  completedAt: string | null;
+  skippedAt: string | null;
+}
+
+export interface DeployerPlanRecord {
+  id: string;
+  status: 'draft' | 'planned' | 'ready' | 'applied' | 'failed' | 'cancelled';
+  recipeName: string;
+  recipeUrl: string | null;
+  targetPath: string;
+  variables: Record<string, unknown>;
+  recipeRaw: string;
+  metadata: Record<string, unknown>;
+  warnings: string[];
+  impactSummary: Record<string, unknown>;
+  checks: Record<string, unknown>;
+  confirmationTokenHash: string;
+  createdByAdminId: string | null;
+  createdByUsername: string | null;
+  createdAt: string;
+  updatedAt: string;
+  appliedAt: string | null;
+}
+
+export interface DeployerPlanStepRecord {
+  id: string;
+  planId: string;
+  stepIndex: number;
+  label: string;
+  action: string;
+  impact: string;
+  target: string | null;
+  isDestructive: boolean;
+  details: Record<string, unknown> | null;
 }
 
 export class PortsideStore {
@@ -467,6 +560,13 @@ export class PortsideStore {
         updated_at TEXT NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS app_settings (
+        key TEXT PRIMARY KEY,
+        value_json TEXT NOT NULL,
+        version INTEGER NOT NULL DEFAULT 1,
+        updated_at TEXT NOT NULL
+      );
+
       CREATE TABLE IF NOT EXISTS recipe_catalog_entries (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
@@ -517,6 +617,55 @@ export class PortsideStore {
         message TEXT NOT NULL,
         FOREIGN KEY (job_id) REFERENCES deployer_jobs(id) ON DELETE CASCADE
       );
+
+      CREATE TABLE IF NOT EXISTS onboarding_state (
+        admin_id TEXT PRIMARY KEY,
+        completed INTEGER NOT NULL DEFAULT 0,
+        skipped INTEGER NOT NULL DEFAULT 0,
+        milestone TEXT NOT NULL DEFAULT 'account_created',
+        deployment_source TEXT,
+        attached_target_path TEXT,
+        milestones TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        completed_at TEXT,
+        skipped_at TEXT,
+        FOREIGN KEY (admin_id) REFERENCES admins(id) ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS deployer_plans (
+        id TEXT PRIMARY KEY,
+        status TEXT NOT NULL,
+        recipe_name TEXT NOT NULL,
+        recipe_url TEXT,
+        target_path TEXT NOT NULL,
+        variables TEXT NOT NULL,
+        recipe_raw TEXT NOT NULL,
+        metadata TEXT NOT NULL,
+        warnings TEXT NOT NULL,
+        impact_summary TEXT NOT NULL,
+        checks TEXT NOT NULL,
+        confirmation_token_hash TEXT NOT NULL,
+        created_by_admin_id TEXT,
+        created_by_username TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        applied_at TEXT
+      );
+
+      CREATE TABLE IF NOT EXISTS deployer_plan_steps (
+        id TEXT PRIMARY KEY,
+        plan_id TEXT NOT NULL,
+        step_index INTEGER NOT NULL,
+        label TEXT NOT NULL,
+        action TEXT NOT NULL,
+        impact TEXT NOT NULL,
+        target TEXT,
+        is_destructive INTEGER NOT NULL DEFAULT 0,
+        details TEXT,
+        UNIQUE(plan_id, step_index),
+        FOREIGN KEY (plan_id) REFERENCES deployer_plans(id) ON DELETE CASCADE
+      );
     `);
 
     const monitorColumns = this.db.prepare('PRAGMA table_info(monitor_players)').all() as { name: string }[];
@@ -534,6 +683,66 @@ export class PortsideStore {
     if (!moderationColumns.some(column => column.name === 'acknowledgement_metadata')) {
       this.db.prepare('ALTER TABLE moderation_actions ADD COLUMN acknowledgement_metadata TEXT').run();
     }
+
+    const deployerJobColumns = this.db.prepare('PRAGMA table_info(deployer_jobs)').all() as { name: string }[];
+    if (!deployerJobColumns.some(column => column.name === 'plan_id')) {
+      this.db.prepare('ALTER TABLE deployer_jobs ADD COLUMN plan_id TEXT').run();
+    }
+    if (!deployerJobColumns.some(column => column.name === 'resume_from_step')) {
+      this.db.prepare('ALTER TABLE deployer_jobs ADD COLUMN resume_from_step INTEGER').run();
+    }
+    if (!deployerJobColumns.some(column => column.name === 'confirmation_hash')) {
+      this.db.prepare('ALTER TABLE deployer_jobs ADD COLUMN confirmation_hash TEXT').run();
+    }
+
+    const onboardingColumns = this.db.prepare('PRAGMA table_info(onboarding_state)').all() as { name: string }[];
+    if (!onboardingColumns.some(column => column.name === 'deployment_source')) {
+      this.db.prepare('ALTER TABLE onboarding_state ADD COLUMN deployment_source TEXT').run();
+    }
+    if (!onboardingColumns.some(column => column.name === 'attached_target_path')) {
+      this.db.prepare('ALTER TABLE onboarding_state ADD COLUMN attached_target_path TEXT').run();
+    }
+
+    this.migrateAppSettings();
+  }
+
+  private migrateAppSettings() {
+    const hasDiscordSetting = this.db.prepare('SELECT 1 FROM app_settings WHERE key = ? LIMIT 1').get('discord.status');
+    if (hasDiscordSetting) return;
+    const legacyRow = this.db.prepare('SELECT * FROM discord_status_settings WHERE id = ?').get('current') as any;
+    if (!legacyRow) return;
+    const payload = {
+      enabled: Boolean(legacyRow.enabled),
+      guildId: legacyRow.guild_id || null,
+      statusChannelId: legacyRow.status_channel_id || null,
+      statusMessageId: legacyRow.status_message_id || null,
+      updateIntervalSeconds: Math.max(30, Number(legacyRow.update_interval_seconds || 60)),
+    };
+    this.setAppSetting('discord.status', payload, 1);
+  }
+
+  getAppSetting(key: string): AppSettingRecord | null {
+    const row = this.db.prepare('SELECT key, value_json, version, updated_at FROM app_settings WHERE key = ?').get(key) as any;
+    if (!row) return null;
+    return {
+      key: row.key,
+      value: row.value_json ? JSON.parse(row.value_json) : {},
+      version: Number.isFinite(Number(row.version)) ? Number(row.version) : 1,
+      updatedAt: row.updated_at || now(),
+    };
+  }
+
+  setAppSetting(key: string, value: Record<string, unknown>, version = 1) {
+    const timestamp = now();
+    this.db.prepare(`
+      INSERT INTO app_settings (key, value_json, version, updated_at)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(key) DO UPDATE SET
+        value_json = excluded.value_json,
+        version = excluded.version,
+        updated_at = excluded.updated_at
+    `).run(key, JSON.stringify(value || {}), version, timestamp);
+    return this.getAppSetting(key);
   }
 
   hasOwner() {
@@ -1006,14 +1215,32 @@ export class PortsideStore {
     const envGuildId = process.env.PORTSIDE_DISCORD_GUILD_ID || null;
     const envChannelId = process.env.PORTSIDE_DISCORD_STATUS_CHANNEL_ID || null;
     const envMessageId = process.env.PORTSIDE_DISCORD_STATUS_MESSAGE_ID || null;
+    const setting = this.getAppSetting('discord.status');
+    const settingValue = setting?.value || {};
     const row = this.db.prepare('SELECT * FROM discord_status_settings WHERE id = ?').get('current') as any;
+    const enabled = typeof settingValue.enabled === 'boolean' ? settingValue.enabled : Boolean(row?.enabled);
+    const guildId = typeof settingValue.guildId === 'string' ? settingValue.guildId : (settingValue.guildId === null ? null : row?.guild_id || envGuildId);
+    const statusChannelId = typeof settingValue.statusChannelId === 'string'
+      ? settingValue.statusChannelId
+      : (settingValue.statusChannelId === null ? null : row?.status_channel_id || envChannelId);
+    const statusMessageId = typeof settingValue.statusMessageId === 'string'
+      ? settingValue.statusMessageId
+      : (settingValue.statusMessageId === null ? null : row?.status_message_id || envMessageId);
+    const updateIntervalSeconds = Math.max(
+      30,
+      Number(
+        typeof settingValue.updateIntervalSeconds === 'number'
+          ? settingValue.updateIntervalSeconds
+          : (row?.update_interval_seconds || process.env.PORTSIDE_DISCORD_STATUS_INTERVAL_SECONDS || 60)
+      ),
+    );
     return {
-      enabled: Boolean(row?.enabled),
-      guildId: row?.guild_id || envGuildId,
-      statusChannelId: row?.status_channel_id || envChannelId,
-      statusMessageId: row?.status_message_id || envMessageId,
-      updateIntervalSeconds: Math.max(30, Number(row?.update_interval_seconds || process.env.PORTSIDE_DISCORD_STATUS_INTERVAL_SECONDS || 60)),
-      updatedAt: row?.updated_at || now(),
+      enabled,
+      guildId,
+      statusChannelId,
+      statusMessageId,
+      updateIntervalSeconds,
+      updatedAt: setting?.updatedAt || row?.updated_at || now(),
     };
   }
 
@@ -1044,7 +1271,81 @@ export class PortsideStore {
       interval,
       timestamp
     );
+    this.setAppSetting('discord.status', {
+      enabled: input.enabled,
+      guildId: input.guildId || null,
+      statusChannelId: input.statusChannelId || null,
+      statusMessageId: input.statusMessageId || null,
+      updateIntervalSeconds: interval,
+    }, 1);
     return this.getDiscordStatusSettings();
+  }
+
+  getUpdatesConfig(): UpdatesConfigRecord {
+    const setting = this.getAppSetting('updates.config');
+    const value = setting?.value || {};
+    const owner = typeof value.owner === 'string' && value.owner.trim() ? value.owner.trim() : 'RebelFinatic';
+    const repo = typeof value.repo === 'string' && value.repo.trim() ? value.repo.trim() : 'portside';
+    return {
+      source: 'github-releases',
+      owner,
+      repo,
+    };
+  }
+
+  updateUpdatesConfig(input: Partial<UpdatesConfigRecord>) {
+    const current = this.getUpdatesConfig();
+    const next: UpdatesConfigRecord = {
+      source: 'github-releases',
+      owner: typeof input.owner === 'string' && input.owner.trim() ? input.owner.trim() : current.owner,
+      repo: typeof input.repo === 'string' && input.repo.trim() ? input.repo.trim() : current.repo,
+    };
+    this.setAppSetting('updates.config', {
+      source: next.source,
+      owner: next.owner,
+      repo: next.repo,
+    }, 1);
+    return next;
+  }
+
+  getUpdatesCache(): UpdatesCacheRecord | null {
+    const setting = this.getAppSetting('updates.cache');
+    if (!setting) return null;
+    const value = setting.value || {};
+    return {
+      source: 'github-releases',
+      owner: typeof value.owner === 'string' ? value.owner : 'RebelFinatic',
+      repo: typeof value.repo === 'string' ? value.repo : 'portside',
+      latestVersion: typeof value.latestVersion === 'string' ? value.latestVersion : null,
+      checkedAt: typeof value.checkedAt === 'string' ? value.checkedAt : setting.updatedAt,
+      releases: Array.isArray(value.releases) ? value.releases as UpdateReleaseRecord[] : [],
+      fetchError: typeof value.fetchError === 'string' ? value.fetchError : null,
+    };
+  }
+
+  setUpdatesCache(input: UpdatesCacheRecord) {
+    this.setAppSetting('updates.cache', {
+      source: input.source,
+      owner: input.owner,
+      repo: input.repo,
+      latestVersion: input.latestVersion,
+      checkedAt: input.checkedAt,
+      releases: input.releases,
+      fetchError: input.fetchError,
+    }, 1);
+    return this.getUpdatesCache();
+  }
+
+  getDefaultDeployerTargetPath() {
+    const setting = this.getAppSetting('deployer.defaultTargetPath');
+    if (!setting) return null;
+    const value = setting.value || {};
+    return typeof value.path === 'string' && value.path.trim() ? value.path : null;
+  }
+
+  setDefaultDeployerTargetPath(targetPath: string) {
+    this.setAppSetting('deployer.defaultTargetPath', { path: targetPath }, 1);
+    return this.getDefaultDeployerTargetPath();
   }
 
   private mapRecipeCatalogEntry(row: any): RecipeCatalogEntryRecord {
@@ -1113,6 +1414,7 @@ export class PortsideStore {
     return {
       id: row.id,
       status: row.status,
+      planId: row.plan_id || null,
       recipeName: row.recipe_name,
       recipeUrl: row.recipe_url,
       targetPath: row.target_path,
@@ -1120,6 +1422,8 @@ export class PortsideStore {
       recipeRaw: row.recipe_raw,
       metadata: row.metadata ? JSON.parse(row.metadata) : {},
       validation: row.validation ? JSON.parse(row.validation) : null,
+      resumeFromStep: Number.isFinite(Number(row.resume_from_step)) ? Number(row.resume_from_step) : null,
+      confirmationHash: row.confirmation_hash || null,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
       startedAt: row.started_at,
@@ -1129,26 +1433,34 @@ export class PortsideStore {
   }
 
   createDeployerJob(input: {
+    status?: string;
+    planId?: string | null;
     recipeName: string;
     recipeUrl?: string | null;
     targetPath: string;
     variables: Record<string, unknown>;
     recipeRaw: string;
     metadata: Record<string, unknown>;
+    resumeFromStep?: number | null;
+    confirmationHash?: string | null;
   }) {
     const id = crypto.randomUUID();
     const timestamp = now();
     this.db.prepare(`
-      INSERT INTO deployer_jobs (id, status, recipe_name, recipe_url, target_path, variables, recipe_raw, metadata, created_at, updated_at)
-      VALUES (?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO deployer_jobs (id, status, plan_id, recipe_name, recipe_url, target_path, variables, recipe_raw, metadata, resume_from_step, confirmation_hash, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id,
+      input.status || 'pending',
+      input.planId || null,
       input.recipeName,
       input.recipeUrl || null,
       input.targetPath,
       JSON.stringify(input.variables || {}),
       input.recipeRaw,
       JSON.stringify(input.metadata || {}),
+      input.resumeFromStep === undefined ? null : input.resumeFromStep,
+      input.confirmationHash || null,
       timestamp,
       timestamp
     );
@@ -1180,12 +1492,14 @@ export class PortsideStore {
     startedAt?: string | null;
     finishedAt?: string | null;
     error?: string | null;
+    resumeFromStep?: number | null;
+    confirmationHash?: string | null;
   }) {
     const existing = this.getDeployerJob(id, { includeSecrets: true });
     if (!existing) return null;
     this.db.prepare(`
       UPDATE deployer_jobs
-      SET status = ?, validation = ?, started_at = ?, finished_at = ?, error = ?, updated_at = ?
+      SET status = ?, validation = ?, started_at = ?, finished_at = ?, error = ?, resume_from_step = ?, confirmation_hash = ?, updated_at = ?
       WHERE id = ?
     `).run(
       input.status || existing.status,
@@ -1193,6 +1507,8 @@ export class PortsideStore {
       input.startedAt === undefined ? existing.startedAt : input.startedAt,
       input.finishedAt === undefined ? existing.finishedAt : input.finishedAt,
       input.error === undefined ? existing.error : input.error,
+      input.resumeFromStep === undefined ? existing.resumeFromStep : input.resumeFromStep,
+      input.confirmationHash === undefined ? existing.confirmationHash : input.confirmationHash,
       now(),
       id
     );
@@ -1254,6 +1570,251 @@ export class PortsideStore {
       LIMIT ?
     `).all(jobId, limit) as DeployerLogRecord[];
     return rows;
+  }
+
+  private defaultOnboardingMilestones() {
+    return {
+      account_created: null,
+      environment_checked: null,
+      recipe_selected: null,
+      variables_completed: null,
+      deployment_planned: null,
+      deployment_applied: null,
+      go_live_ready: null,
+    } as Record<OnboardingMilestone, string | null>;
+  }
+
+  private parseOnboardingMilestones(value: unknown) {
+    const base = this.defaultOnboardingMilestones();
+    const parsed = typeof value === 'string' && value ? JSON.parse(value) : {};
+    for (const key of Object.keys(base) as OnboardingMilestone[]) {
+      const next = (parsed as Record<string, unknown>)[key];
+      if (typeof next === 'string' || next === null) {
+        base[key] = next;
+      }
+    }
+    return base;
+  }
+
+  private mapOnboardingState(row: any): OnboardingStateRecord {
+    return {
+      adminId: row.admin_id,
+      completed: Boolean(row.completed),
+      skipped: Boolean(row.skipped),
+      milestone: row.milestone,
+      deploymentSource: row.deployment_source || null,
+      attachedTargetPath: row.attached_target_path || null,
+      defaultTargetPath: this.getDefaultDeployerTargetPath(),
+      milestones: this.parseOnboardingMilestones(row.milestones),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      completedAt: row.completed_at,
+      skippedAt: row.skipped_at,
+    };
+  }
+
+  getOnboardingState(adminId: string) {
+    const existing = this.db.prepare('SELECT * FROM onboarding_state WHERE admin_id = ?').get(adminId) as any;
+    if (existing) return this.mapOnboardingState(existing);
+
+    const timestamp = now();
+    this.db.prepare(`
+      INSERT INTO onboarding_state (admin_id, completed, skipped, milestone, milestones, created_at, updated_at)
+      VALUES (?, 0, 0, 'account_created', ?, ?, ?)
+    `).run(adminId, JSON.stringify(this.defaultOnboardingMilestones()), timestamp, timestamp);
+    const created = this.db.prepare('SELECT * FROM onboarding_state WHERE admin_id = ?').get(adminId) as any;
+    return this.mapOnboardingState(created);
+  }
+
+  upsertOnboardingState(adminId: string, input: {
+    milestone?: OnboardingMilestone;
+    deploymentSource?: OnboardingDeploymentSource | null;
+    attachedTargetPath?: string | null;
+    completed?: boolean;
+    skipped?: boolean;
+    completedAt?: string | null;
+    skippedAt?: string | null;
+    milestoneTimestamp?: string | null;
+  }) {
+    const existing = this.getOnboardingState(adminId);
+    const timestamp = now();
+    const milestones = { ...existing.milestones };
+    if (input.milestone) {
+      milestones[input.milestone] = input.milestoneTimestamp === undefined ? timestamp : input.milestoneTimestamp;
+    }
+    const completed = input.completed === undefined ? existing.completed : input.completed;
+    const skipped = input.skipped === undefined ? existing.skipped : input.skipped;
+    this.db.prepare(`
+      UPDATE onboarding_state
+      SET completed = ?, skipped = ?, milestone = ?, deployment_source = ?, attached_target_path = ?, milestones = ?, completed_at = ?, skipped_at = ?, updated_at = ?
+      WHERE admin_id = ?
+    `).run(
+      completed ? 1 : 0,
+      skipped ? 1 : 0,
+      input.milestone || existing.milestone,
+      input.deploymentSource === undefined ? existing.deploymentSource : input.deploymentSource,
+      input.attachedTargetPath === undefined ? existing.attachedTargetPath : input.attachedTargetPath,
+      JSON.stringify(milestones),
+      input.completedAt === undefined ? existing.completedAt : input.completedAt,
+      input.skippedAt === undefined ? existing.skippedAt : input.skippedAt,
+      timestamp,
+      adminId
+    );
+    return this.getOnboardingState(adminId);
+  }
+
+  private mapDeployerPlan(row: any): DeployerPlanRecord {
+    return {
+      id: row.id,
+      status: row.status,
+      recipeName: row.recipe_name,
+      recipeUrl: row.recipe_url,
+      targetPath: row.target_path,
+      variables: row.variables ? JSON.parse(row.variables) : {},
+      recipeRaw: row.recipe_raw,
+      metadata: row.metadata ? JSON.parse(row.metadata) : {},
+      warnings: row.warnings ? JSON.parse(row.warnings) : [],
+      impactSummary: row.impact_summary ? JSON.parse(row.impact_summary) : {},
+      checks: row.checks ? JSON.parse(row.checks) : {},
+      confirmationTokenHash: row.confirmation_token_hash,
+      createdByAdminId: row.created_by_admin_id,
+      createdByUsername: row.created_by_username,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      appliedAt: row.applied_at,
+    };
+  }
+
+  createDeployerPlan(input: {
+    status?: DeployerPlanRecord['status'];
+    recipeName: string;
+    recipeUrl?: string | null;
+    targetPath: string;
+    variables: Record<string, unknown>;
+    recipeRaw: string;
+    metadata: Record<string, unknown>;
+    warnings: string[];
+    impactSummary: Record<string, unknown>;
+    checks: Record<string, unknown>;
+    confirmationTokenHash: string;
+    createdByAdminId?: string | null;
+    createdByUsername?: string | null;
+  }) {
+    const id = crypto.randomUUID();
+    const timestamp = now();
+    this.db.prepare(`
+      INSERT INTO deployer_plans (
+        id, status, recipe_name, recipe_url, target_path, variables, recipe_raw, metadata, warnings,
+        impact_summary, checks, confirmation_token_hash, created_by_admin_id, created_by_username, created_at, updated_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      id,
+      input.status || 'planned',
+      input.recipeName,
+      input.recipeUrl || null,
+      input.targetPath,
+      JSON.stringify(input.variables || {}),
+      input.recipeRaw,
+      JSON.stringify(input.metadata || {}),
+      JSON.stringify(input.warnings || []),
+      JSON.stringify(input.impactSummary || {}),
+      JSON.stringify(input.checks || {}),
+      input.confirmationTokenHash,
+      input.createdByAdminId || null,
+      input.createdByUsername || null,
+      timestamp,
+      timestamp
+    );
+    return this.getDeployerPlan(id, { includeSecrets: true })!;
+  }
+
+  getDeployerPlan(id: string, options?: { includeSecrets?: boolean }) {
+    const row = this.db.prepare('SELECT * FROM deployer_plans WHERE id = ?').get(id) as any;
+    const plan = row ? this.mapDeployerPlan(row) : null;
+    if (!plan || options?.includeSecrets) return plan;
+    return {
+      ...plan,
+      variables: redactRecord(plan.variables),
+      recipeRaw: '',
+      confirmationTokenHash: '',
+    };
+  }
+
+  updateDeployerPlan(id: string, input: {
+    status?: DeployerPlanRecord['status'];
+    checks?: Record<string, unknown>;
+    warnings?: string[];
+    impactSummary?: Record<string, unknown>;
+    appliedAt?: string | null;
+  }) {
+    const existing = this.getDeployerPlan(id, { includeSecrets: true });
+    if (!existing) return null;
+    this.db.prepare(`
+      UPDATE deployer_plans
+      SET status = ?, warnings = ?, impact_summary = ?, checks = ?, applied_at = ?, updated_at = ?
+      WHERE id = ?
+    `).run(
+      input.status || existing.status,
+      input.warnings === undefined ? JSON.stringify(existing.warnings) : JSON.stringify(input.warnings || []),
+      input.impactSummary === undefined ? JSON.stringify(existing.impactSummary) : JSON.stringify(input.impactSummary || {}),
+      input.checks === undefined ? JSON.stringify(existing.checks) : JSON.stringify(input.checks || {}),
+      input.appliedAt === undefined ? existing.appliedAt : input.appliedAt,
+      now(),
+      id
+    );
+    return this.getDeployerPlan(id);
+  }
+
+  createDeployerPlanStep(input: {
+    planId: string;
+    stepIndex: number;
+    label: string;
+    action: string;
+    impact: string;
+    target?: string | null;
+    isDestructive?: boolean;
+    details?: Record<string, unknown> | null;
+  }) {
+    const id = crypto.randomUUID();
+    this.db.prepare(`
+      INSERT INTO deployer_plan_steps (id, plan_id, step_index, label, action, impact, target, is_destructive, details)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      id,
+      input.planId,
+      input.stepIndex,
+      input.label,
+      input.action,
+      input.impact,
+      input.target || null,
+      input.isDestructive ? 1 : 0,
+      input.details ? JSON.stringify(input.details) : null
+    );
+    return id;
+  }
+
+  listDeployerPlanSteps(planId: string): DeployerPlanStepRecord[] {
+    const rows = this.db.prepare(`
+      SELECT
+        id,
+        plan_id as planId,
+        step_index as stepIndex,
+        label,
+        action,
+        impact,
+        target,
+        is_destructive as isDestructive,
+        details
+      FROM deployer_plan_steps
+      WHERE plan_id = ?
+      ORDER BY step_index ASC
+    `).all(planId) as any[];
+    return rows.map(row => ({
+      ...row,
+      isDestructive: Boolean(row.isDestructive),
+      details: row.details ? JSON.parse(row.details) : null,
+    }));
   }
 
   private mapRestartSchedule(row: any): RestartScheduleRecord {

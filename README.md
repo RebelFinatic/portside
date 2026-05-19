@@ -11,7 +11,8 @@ Portside is an open-source operations panel for FiveM servers. It gives server o
 - **Whitelist controls**: Approve identifiers, review requests, and optionally block unapproved joins through the monitor bridge.
 - **Discord status embed**: Optionally run a Discord bot that keeps a server status message updated.
 - **Diagnostics bundle**: Review runtime health and export redacted support data without exposing secrets.
-- **Recipe deployer**: Inspect and run txAdmin-compatible recipes from the official txAdmin catalog, Portside additions, custom URLs, or pasted YAML.
+- **Guided onboarding wizard**: New owners are guided through environment checks, recipe selection, plan review, apply, and go-live checks.
+- **Recipe deployer**: Inspect recipes, generate a safe deployment plan, then apply with explicit confirmation; expert mode remains available.
 - **Live console**: Read server output and execute console/RCON-style commands from the panel.
 - **Durable logs**: Persist admin, FXServer/RCON, and server activity logs under Portside's data path.
 - **Optional managed FXServer mode**: Start, stop, restart, supervise crashes, and schedule restarts when Portside is explicitly configured to own the FXServer process.
@@ -49,7 +50,9 @@ Portside is an open-source operations panel for FiveM servers. It gives server o
 
 ## First-run Setup
 
-Portside no longer ships with a demo production login. On a fresh install, the panel redirects to first-run setup and creates an owner admin in Portside's internal SQLite database. The owner role receives `all_permissions` and cannot be deleted or demoted from the owner role.
+Portside no longer ships with a demo production login. On a fresh install, the panel opens a unified setup wizard at `/onboarding` that creates the owner account and immediately continues into deployment onboarding. The owner role receives `all_permissions` and cannot be deleted or demoted from the owner role.
+
+The wizard can continue with recipe deployment or use an Existing Server Data path. Existing data mode validates path safety plus `server.cfg`/`resources` presence, then attaches that folder as the default deployment target for later Expert Mode use.
 
 The internal database is stored at:
 
@@ -189,15 +192,23 @@ Admins with `settings.view` can open the Diagnostics page to inspect Portside ru
 
 The Download Bundle action exports a JSON support bundle with the same redacted health summary plus recent warning/error logs and failed or denied admin actions. Secret values such as JWT secrets, RCON passwords, monitor tokens, Discord tokens, host API tokens, database passwords, license keys, and Cfx keys are never included as plaintext.
 
+## Updates
+
+Portside includes a standalone Updates page at `/updates` for admins with `settings.view`. It shows current app version, latest cached upstream version, last check time, and recent changelog entries from GitHub releases.
+
+Admins with `settings.write` can run a manual refresh (`POST /api/updates/check`). Update data is cached in SQLite, so the page continues to work when GitHub is temporarily unavailable.
+
 ## Recipe Deployer
 
-Admins with `control.server` can open Recipe Deployer to deploy txAdmin-compatible server templates into a chosen server-data folder. Portside loads the current txAdmin popular recipe catalog from `citizenfx/txAdmin-recipes` and also includes an ND Framework entry that points to:
+Admins with `control.server` can open Recipe Deployer (Expert Mode) or the onboarding wizard to deploy txAdmin-compatible server templates into a chosen server-data folder. Portside loads the current txAdmin popular recipe catalog from `citizenfx/txAdmin-recipes` and also includes an ND Framework entry that points to:
 
 ```text
 https://raw.githubusercontent.com/ND-Framework/txadmin-recipe/main/nd-main.yaml
 ```
 
 If GitHub is unavailable, Portside keeps a cached catalog in SQLite and falls back to bundled entries for FiveM Basic, RedM Basic, ESX Legacy, Qbox, QBCore, VORP Core, and ND Framework. The deployer can also inspect custom recipe URLs or pasted YAML.
+
+Portside uses a plan-then-apply flow by default: it resolves variables, normalizes tasks, computes impact summary (`create`, `overwrite`, `delete`, `download`, `db`), runs preflight checks, and then requires an explicit confirmation token before apply.
 
 Recipe execution is intentionally jailed to the selected target folder and refuses filesystem roots or paths inside the Portside app directory. Deployer logs and API responses redact license keys, database passwords, tokens, connection strings, and similar secrets. Review recipe tasks before running them: supported actions can create, overwrite, move, remove, download, unzip, and run database setup inside the deployment flow.
 
