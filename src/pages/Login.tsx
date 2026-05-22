@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
-import { User, Lock, Loader2 } from 'lucide-react';
+import { User, Lock, Loader2, Link2 } from 'lucide-react';
 import { useAuthStore } from '../store/useAuthStore';
 import { apiFetch } from '../lib/api';
 
@@ -10,10 +10,34 @@ export default function Login() {
   const [password, setPassword] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [setupRequired, setSetupRequired] = useState(false);
+  const [providers, setProviders] = useState<{ cfx?: { enabled: boolean } }>({});
   const login = useAuthStore((state) => state.login);
   const navigate = useNavigate();
 
   useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const callbackToken = params.get('token');
+    const provider = params.get('provider');
+    const status = params.get('status');
+    const reason = params.get('reason');
+
+    if (provider === 'cfx') {
+      if (status === 'error' && reason) {
+        toast.error(reason);
+      } else if (status === 'linked') {
+        toast.success('Cfx account linked successfully');
+      }
+    }
+
+    const loadProviderSummary = async () => {
+      try {
+        const data = await apiFetch('/auth/providers');
+        setProviders(data || {});
+      } catch {
+        setProviders({});
+      }
+    };
+
     apiFetch('/setup/status')
       .then(data => {
         if (data.setupRequired) {
@@ -22,7 +46,35 @@ export default function Login() {
         }
       })
       .catch(() => {});
-  }, [navigate]);
+
+    loadProviderSummary();
+
+    if (!callbackToken) return;
+    setIsLoading(true);
+    fetch('/api/auth/verify', {
+      headers: {
+        Authorization: `Bearer ${callbackToken}`,
+        Accept: 'application/json',
+      },
+    })
+      .then(async response => {
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok || !payload?.user) {
+          throw new Error(payload?.error || 'Provider session verification failed');
+        }
+        login(callbackToken, payload.user);
+        toast.success('Signed in with Cfx.re');
+        navigate('/', { replace: true });
+      })
+      .catch((error: any) => {
+        toast.error(error.message || 'Provider sign-in failed');
+      })
+      .finally(() => {
+        const cleanPath = window.location.pathname;
+        window.history.replaceState({}, '', cleanPath);
+        setIsLoading(false);
+      });
+  }, [navigate, login]);
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -106,6 +158,17 @@ export default function Login() {
             {isLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Authenticate'}
           </button>
         </form>
+        {providers?.cfx?.enabled && (
+          <div className="mt-3">
+            <a
+              href="/api/auth/cfx/start?returnTo=/"
+              className="w-full inline-flex items-center justify-center gap-2 rounded border border-zinc-800 bg-zinc-900 px-4 py-2.5 text-xs font-bold uppercase tracking-wider text-zinc-200 hover:bg-zinc-800 transition-colors"
+            >
+              <Link2 className="h-4 w-4" />
+              Sign In With Cfx.re
+            </a>
+          </div>
+        )}
 
         {setupRequired && (
         <div className="mt-6 text-center text-xs text-zinc-500">

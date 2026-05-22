@@ -47,6 +47,31 @@ export interface SessionRecord {
   revokedAt: string | null;
 }
 
+export interface AdminProviderIdentityRecord {
+  id: string;
+  adminId: string;
+  adminUsername: string;
+  provider: 'cfx';
+  providerUserId: string;
+  displayName: string;
+  identifiers: string[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ProviderAuthStateRecord {
+  id: string;
+  provider: 'cfx';
+  mode: 'login' | 'link';
+  nonce: string;
+  actorAdminId: string | null;
+  targetAdminId: string | null;
+  returnTo: string | null;
+  createdAt: string;
+  expiresAt: string;
+  consumedAt: string | null;
+}
+
 export interface MonitorHeartbeatRecord {
   id: string;
   timestamp: string;
@@ -341,6 +366,32 @@ export class PortsideStore {
         expires_at TEXT NOT NULL,
         revoked_at TEXT,
         FOREIGN KEY (admin_id) REFERENCES admins(id) ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS admin_provider_identities (
+        id TEXT PRIMARY KEY,
+        admin_id TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        provider_user_id TEXT NOT NULL,
+        display_name TEXT NOT NULL,
+        identifiers TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(provider, provider_user_id),
+        FOREIGN KEY (admin_id) REFERENCES admins(id) ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS provider_auth_states (
+        id TEXT PRIMARY KEY,
+        provider TEXT NOT NULL,
+        mode TEXT NOT NULL,
+        nonce TEXT NOT NULL,
+        actor_admin_id TEXT,
+        target_admin_id TEXT,
+        return_to TEXT,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        consumed_at TEXT
       );
 
       CREATE TABLE IF NOT EXISTS admin_action_logs (
@@ -775,6 +826,11 @@ export class PortsideStore {
     return row?.password_hash || null;
   }
 
+  hasPasswordLogin(adminId: string) {
+    const row = this.db.prepare('SELECT password_hash FROM admins WHERE id = ? AND enabled = 1').get(adminId) as { password_hash: string } | undefined;
+    return Boolean(row?.password_hash);
+  }
+
   getAdminByUsername(username: string) {
     const row = this.db.prepare('SELECT id FROM admins WHERE lower(username) = lower(?) AND enabled = 1').get(username) as { id: string } | undefined;
     return row ? this.getAdminById(row.id) : null;
@@ -822,6 +878,144 @@ export class PortsideStore {
 
   revokeSession(id: string) {
     this.db.prepare('UPDATE sessions SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL').run(now(), id);
+  }
+
+  listAdminProviderIdentities() {
+    const rows = this.db.prepare(`
+      SELECT
+        identities.id,
+        identities.admin_id as adminId,
+        admins.username as adminUsername,
+        identities.provider,
+        identities.provider_user_id as providerUserId,
+        identities.display_name as displayName,
+        identities.identifiers,
+        identities.created_at as createdAt,
+        identities.updated_at as updatedAt
+      FROM admin_provider_identities identities
+      JOIN admins ON admins.id = identities.admin_id
+      ORDER BY admins.username ASC, identities.provider ASC, identities.created_at ASC
+    `).all() as any[];
+    return rows.map(row => ({
+      ...row,
+      identifiers: this.parseJsonArray(row.identifiers),
+    })) as AdminProviderIdentityRecord[];
+  }
+
+  getProviderIdentityByProviderUserId(provider: 'cfx', providerUserId: string) {
+    const row = this.db.prepare(`
+      SELECT
+        identities.id,
+        identities.admin_id as adminId,
+        admins.username as adminUsername,
+        identities.provider,
+        identities.provider_user_id as providerUserId,
+        identities.display_name as displayName,
+        identities.identifiers,
+        identities.created_at as createdAt,
+        identities.updated_at as updatedAt
+      FROM admin_provider_identities identities
+      JOIN admins ON admins.id = identities.admin_id
+      WHERE identities.provider = ? AND identities.provider_user_id = ?
+      LIMIT 1
+    `).get(provider, providerUserId) as any;
+    if (!row) return null;
+    return {
+      ...row,
+      identifiers: this.parseJsonArray(row.identifiers),
+    } as AdminProviderIdentityRecord;
+  }
+
+  linkAdminProviderIdentity(input: {
+    adminId: string;
+    provider: 'cfx';
+    providerUserId: string;
+    displayName: string;
+    identifiers: string[];
+  }) {
+    const existingOwner = this.getProviderIdentityByProviderUserId(input.provider, input.providerUserId);
+    if (existingOwner && existingOwner.adminId !== input.adminId) {
+      throw new Error('This provider identity is already linked to another admin');
+    }
+
+    const id = existingOwner?.id || crypto.randomUUID();
+    const timestamp = now();
+    this.db.prepare(`
+      INSERT INTO admin_provider_identities (id, admin_id, provider, provider_user_id, display_name, identifiers, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(provider, provider_user_id) DO UPDATE SET
+        admin_id = excluded.admin_id,
+        display_name = excluded.display_name,
+        identifiers = excluded.identifiers,
+        updated_at = excluded.updated_at
+    `).run(
+      id,
+      input.adminId,
+      input.provider,
+      input.providerUserId,
+      input.displayName,
+      JSON.stringify(cleanIdentifierList(input.identifiers)),
+      existingOwner?.createdAt || timestamp,
+      timestamp,
+    );
+
+    const linked = this.getProviderIdentityByProviderUserId(input.provider, input.providerUserId);
+    if (!linked) throw new Error('Failed to link provider identity');
+    return linked;
+  }
+
+  unlinkAdminProviderIdentity(identityId: string) {
+    const row = this.db.prepare(`
+      SELECT id, admin_id as adminId, provider, provider_user_id as providerUserId
+      FROM admin_provider_identities
+      WHERE id = ?
+      LIMIT 1
+    `).get(identityId) as { id: string; adminId: string; provider: 'cfx'; providerUserId: string } | undefined;
+    if (!row) return null;
+    this.db.prepare('DELETE FROM admin_provider_identities WHERE id = ?').run(identityId);
+    return row;
+  }
+
+  createProviderAuthState(input: {
+    id: string;
+    provider: 'cfx';
+    mode: 'login' | 'link';
+    nonce: string;
+    actorAdminId?: string | null;
+    targetAdminId?: string | null;
+    returnTo?: string | null;
+    expiresAt: string;
+  }) {
+    this.db.prepare(`
+      INSERT INTO provider_auth_states (id, provider, mode, nonce, actor_admin_id, target_admin_id, return_to, created_at, expires_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      input.id,
+      input.provider,
+      input.mode,
+      input.nonce,
+      input.actorAdminId || null,
+      input.targetAdminId || null,
+      input.returnTo || null,
+      now(),
+      input.expiresAt,
+    );
+  }
+
+  consumeProviderAuthState(id: string, nonce: string) {
+    const row = this.db.prepare(`
+      SELECT id, provider, mode, nonce, actor_admin_id as actorAdminId, target_admin_id as targetAdminId, return_to as returnTo, created_at as createdAt, expires_at as expiresAt, consumed_at as consumedAt
+      FROM provider_auth_states
+      WHERE id = ?
+      LIMIT 1
+    `).get(id) as ProviderAuthStateRecord | undefined;
+    if (!row) return null;
+    if (row.consumedAt) throw new Error('This auth flow has already been used');
+    if (row.nonce !== nonce) throw new Error('Invalid auth state nonce');
+    if (new Date(row.expiresAt).getTime() <= Date.now()) throw new Error('Auth flow expired');
+
+    this.db.prepare('UPDATE provider_auth_states SET consumed_at = ? WHERE id = ?').run(now(), id);
+    return row;
   }
 
   getRolePermissions(roleId: string) {

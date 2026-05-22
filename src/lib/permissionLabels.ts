@@ -1,0 +1,35 @@
+export const PERMISSION_LABELS: Record<string, { label: string; description: string }> = {
+  all_permissions: { label: 'Full access', description: 'Grants every permission; individual toggles are ignored.' },
+  'manage.admins': { label: 'Manage admins', description: 'Create, edit, and remove admin accounts and roles.' },
+  'settings.view': { label: 'View settings', description: 'View diagnostics and non-secret configuration.' },
+  'settings.write': { label: 'Edit settings', description: 'Change panel and server settings.' },
+  'console.view': { label: 'View console', description: 'Read live FXServer console output.' },
+  'console.write': { label: 'Run console commands', description: 'Execute RCON commands from the panel.' },
+  'control.server': { label: 'Control server', description: 'Start, stop, restart FXServer and run deployer jobs.' },
+  announcement: { label: 'Announcements', description: 'Send server-wide announcements.' },
+  'commands.resources': { label: 'Manage resources', description: 'Start, stop, and restart FiveM resources.' },
+  'server.cfg.editor': { label: 'Edit server.cfg', description: 'Read and write server configuration files.' },
+  'txadmin.log.view': { label: 'View admin logs', description: 'View Portside admin and system action logs.' },
+  'server.log.view': { label: 'View server activity', description: 'View in-game activity and server logs.' },
+  'menu.vehicle': { label: 'In-game vehicles', description: 'Spawn and manage vehicles from the in-game menu.' },
+  'menu.clear_area': { label: 'Clear world area', description: 'Reset an area of the map from the in-game menu.' },
+  'menu.viewids': { label: 'View player IDs', description: 'Show player IDs in the in-game menu.' },
+  'players.direct_message': { label: 'Direct message', description: 'Send a direct message to an online player.' },
+  'players.whitelist': { label: 'Manage whitelist', description: 'Approve entries and review whitelist requests.' },
+  'players.warn': { label: 'Warn players', description: 'Issue warnings and add staff notes.' },
+  'players.kick': { label: 'Kick players', description: 'Kick online players, including kick-all.' },
+  'players.ban': { label: 'Ban players', description: 'Ban, unban, and revoke ban actions.' },
+  'players.freeze': { label: 'Freeze players', description: 'Freeze player peds from the in-game menu.' },
+  'players.heal': { label: 'Heal players', description: 'Heal self, a player, or everyone in-game.' },
+  'players.playermode': { label: 'Player mode', description: 'NoClip, god mode, and super jump in-game.' },
+  'players.spectate': { label: 'Spectate', description: 'Spectate players from the in-game menu.' },
+  'players.teleport': { label: 'Teleport', description: 'Teleport self or players in-game.' },
+  'players.troll': { label: 'Troll actions', description: 'Fun/troll moderation actions in-game.' },
+  'database.read': { label: 'Database read', description: 'Browse tables and run read-only SQL.' },
+  'database.write': { label: 'Database write', description: 'Run mutating SQL against the game database.' },
+  'database.admin': { label: 'Database admin', description: 'Destructive SQL and advanced database operations.' },
+};
+
+export function getPermissionMeta(perm: string) {
+  return PERMISSION_LABELS[perm] ?? { label: perm, description: 'Custom or legacy permission.' };
+}

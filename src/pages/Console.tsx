@@ -169,6 +169,7 @@ export default function Console() {
   const [presetModalOpen, setPresetModalOpen] = useState(false);
   const [newPresetName, setNewPresetName] = useState('');
   const [isFollowingTail, setIsFollowingTail] = useState(true);
+  const [wsConnected, setWsConnected] = useState(false);
 
   const outputRef = useRef<HTMLDivElement>(null);
   const endOfLogsRef = useRef<HTMLDivElement>(null);
@@ -229,6 +230,9 @@ export default function Console() {
     if (!token) return;
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const socket = new WebSocket(`${protocol}//${window.location.host}/api/realtime?rooms=logs&token=${encodeURIComponent(token)}`);
+    socket.addEventListener('open', () => setWsConnected(true));
+    socket.addEventListener('close', () => setWsConnected(false));
+    socket.addEventListener('error', () => setWsConnected(false));
     socket.addEventListener('message', event => {
       try {
         const data = JSON.parse(event.data);
@@ -241,7 +245,10 @@ export default function Console() {
         // Ignore malformed realtime messages.
       }
     });
-    return () => socket.close();
+    return () => {
+      setWsConnected(false);
+      socket.close();
+    };
   }, [token]);
 
   const scrollToLatest = (behavior: ScrollBehavior = 'auto') => {
@@ -424,6 +431,18 @@ export default function Console() {
         <div className="p-3 bg-zinc-900 border-b border-zinc-800 flex justify-between items-center flex-wrap gap-3">
           <span className="text-[10px] font-bold uppercase tracking-widest text-zinc-400 flex items-center gap-2">
             <Terminal className="h-3.5 w-3.5" /> Real-time Console Stream
+            <span
+              className={`inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[9px] font-bold tracking-widest ${
+                isFollowingTail
+                  ? wsConnected
+                    ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-400'
+                    : 'border-yellow-500/30 bg-yellow-500/10 text-yellow-300'
+                  : 'border-zinc-700 bg-zinc-900 text-zinc-500'
+              }`}
+            >
+              <span className={`h-1.5 w-1.5 rounded-full ${isFollowingTail && wsConnected ? 'bg-emerald-400 animate-pulse' : 'bg-zinc-500'}`} />
+              {isFollowingTail ? (wsConnected ? 'LIVE' : 'POLLING') : 'PAUSED'}
+            </span>
           </span>
           <div className="flex items-center gap-4">
             <div className="flex items-center gap-2">

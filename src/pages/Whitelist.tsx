@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from 're
 import { Check, CircleAlert, MessageCircle, Plus, RefreshCw, ShieldCheck, Trash2, X } from 'lucide-react';
 import { toast } from 'sonner';
 import { apiFetch } from '../lib/api';
+import ConfirmModal from '../components/ConfirmModal';
 
 interface WhitelistStatus {
   mode: 'disabled' | 'dry-run' | 'enforced';
@@ -72,6 +73,9 @@ export default function Whitelist() {
     statusMessageId: '',
     updateIntervalSeconds: 60,
   });
+  const [entryPendingDelete, setEntryPendingDelete] = useState<WhitelistEntry | null>(null);
+  const [rejectingRequestId, setRejectingRequestId] = useState<string | null>(null);
+  const [rejectReason, setRejectReason] = useState('');
 
   const modeLabel = useMemo(() => {
     if (status.mode === 'enforced') return 'Enforced';
@@ -130,6 +134,7 @@ export default function Whitelist() {
     try {
       await apiFetch(`/whitelist/entries/${id}`, { method: 'DELETE' });
       setEntries(prev => prev.filter(entry => entry.id !== id));
+      setEntryPendingDelete(null);
       toast.success('Whitelist entry removed');
       load();
     } catch (error: any) {
@@ -137,13 +142,17 @@ export default function Whitelist() {
     }
   };
 
-  const reviewRequest = async (id: string, decision: 'approve' | 'reject') => {
+  const reviewRequest = async (id: string, decision: 'approve' | 'reject', reason: string) => {
     try {
       await apiFetch(`/whitelist/requests/${id}/${decision}`, {
         method: 'POST',
-        body: JSON.stringify({ reason: decision === 'approve' ? 'Approved in Portside' : 'Rejected in Portside' }),
+        body: JSON.stringify({
+          reason: reason.trim() || (decision === 'approve' ? 'Approved in Portside' : 'Rejected in Portside'),
+        }),
       });
       toast.success(decision === 'approve' ? 'Request approved' : 'Request rejected');
+      setRejectingRequestId(null);
+      setRejectReason('');
       load();
     } catch (error: any) {
       toast.error('Could not review request', { description: error.message });
@@ -178,7 +187,7 @@ export default function Whitelist() {
       </div>
 
       <div className="mb-6 grid grid-cols-1 gap-4 md:grid-cols-3">
-        <StatusCard icon={<ShieldCheck className="h-5 w-5" />} label="Mode" value={modeLabel} detail="Set with PORTSIDE_WHITELIST_MODE" tone={status.mode === 'enforced' ? 'green' : status.mode === 'dry-run' ? 'yellow' : 'zinc'} />
+        <StatusCard icon={<ShieldCheck className="h-5 w-5" />} label="Mode" value={modeLabel} detail="Configure PORTSIDE_WHITELIST_MODE in your server environment (.env)" tone={status.mode === 'enforced' ? 'green' : status.mode === 'dry-run' ? 'yellow' : 'zinc'} />
         <StatusCard icon={<Check className="h-5 w-5" />} label="Approved" value={String(status.entries)} detail="Active whitelist entries" tone="green" />
         <StatusCard icon={<MessageCircle className="h-5 w-5" />} label="Discord" value={status.discord.bot?.connected ? 'Connected' : status.discord.tokenConfigured ? 'Configured' : 'Token missing'} detail={status.discord.bot?.lastError || 'Status embed foundation'} tone={status.discord.bot?.connected ? 'green' : 'zinc'} />
       </div>
@@ -211,7 +220,7 @@ export default function Whitelist() {
                   <div className="truncate font-mono text-sm text-white">{entry.value}</div>
                   <div className="mt-1 truncate text-xs text-zinc-500">{entry.note || `added by ${entry.createdByUsername || 'system'}`}</div>
                 </div>
-                <button onClick={() => deleteEntry(entry.id)} className="flex h-9 w-9 items-center justify-center rounded border border-red-500/20 text-red-400 hover:bg-red-500/10" title="Remove entry">
+                <button onClick={() => setEntryPendingDelete(entry)} className="flex h-9 w-9 items-center justify-center rounded border border-red-500/20 text-red-400 hover:bg-red-500/10" title="Remove entry">
                   <Trash2 className="h-4 w-4" />
                 </button>
               </div>
@@ -232,16 +241,44 @@ export default function Whitelist() {
                   <div className="font-semibold text-white">{request.playerName}</div>
                   <div className="mt-1 truncate font-mono text-[11px] text-zinc-500">{request.identifiers[0] || request.discordId || 'no identifier captured'}</div>
                   {request.reason ? <p className="mt-2 text-xs text-zinc-400">{request.reason}</p> : null}
-                  <div className="mt-3 flex gap-2">
-                    <button onClick={() => reviewRequest(request.id, 'approve')} className="flex items-center gap-2 rounded bg-green-600 px-3 py-1.5 text-xs font-bold text-white hover:bg-green-500">
-                      <Check className="h-3.5 w-3.5" />
-                      Approve
-                    </button>
-                    <button onClick={() => reviewRequest(request.id, 'reject')} className="flex items-center gap-2 rounded border border-red-500/30 px-3 py-1.5 text-xs font-bold text-red-300 hover:bg-red-500/10">
-                      <X className="h-3.5 w-3.5" />
-                      Reject
-                    </button>
-                  </div>
+                  {rejectingRequestId === request.id ? (
+                    <div className="mt-3 space-y-2">
+                      <textarea
+                        value={rejectReason}
+                        onChange={event => setRejectReason(event.target.value)}
+                        placeholder="Rejection reason (required)"
+                        rows={2}
+                        className="w-full rounded border border-zinc-800 bg-black/40 px-3 py-2 text-xs text-white placeholder:text-zinc-600 focus:outline-none focus:border-red-500"
+                      />
+                      <div className="flex gap-2">
+                        <button
+                          onClick={() => reviewRequest(request.id, 'reject', rejectReason)}
+                          disabled={!rejectReason.trim()}
+                          className="flex items-center gap-2 rounded bg-red-600 px-3 py-1.5 text-xs font-bold text-white hover:bg-red-500 disabled:opacity-50"
+                        >
+                          Confirm Reject
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => { setRejectingRequestId(null); setRejectReason(''); }}
+                          className="rounded border border-zinc-700 px-3 py-1.5 text-xs font-bold text-zinc-400 hover:text-white"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="mt-3 flex gap-2">
+                      <button onClick={() => reviewRequest(request.id, 'approve', 'Approved in Portside')} className="flex items-center gap-2 rounded bg-green-600 px-3 py-1.5 text-xs font-bold text-white hover:bg-green-500">
+                        <Check className="h-3.5 w-3.5" />
+                        Approve
+                      </button>
+                      <button onClick={() => { setRejectingRequestId(request.id); setRejectReason(''); }} className="flex items-center gap-2 rounded border border-red-500/30 px-3 py-1.5 text-xs font-bold text-red-300 hover:bg-red-500/10">
+                        <X className="h-3.5 w-3.5" />
+                        Reject
+                      </button>
+                    </div>
+                  )}
                 </div>
               ))}
             </div>
@@ -274,6 +311,16 @@ export default function Whitelist() {
           </section>
         </div>
       </div>
+
+      <ConfirmModal
+        open={Boolean(entryPendingDelete)}
+        title="Remove whitelist entry?"
+        description={entryPendingDelete ? `Remove ${entryPendingDelete.value} from the approved list. This player may be blocked on join if whitelist is enforced.` : ''}
+        confirmLabel="Remove Entry"
+        danger
+        onConfirm={() => entryPendingDelete && deleteEntry(entryPendingDelete.id)}
+        onCancel={() => setEntryPendingDelete(null)}
+      />
     </div>
   );
 }

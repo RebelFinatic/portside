@@ -52,7 +52,9 @@ Portside is an open-source operations panel for FiveM servers. It gives server o
 
 Portside no longer ships with a demo production login. On a fresh install, the panel opens a unified setup wizard at `/onboarding` that creates the owner account and immediately continues into deployment onboarding. The owner role receives `all_permissions` and cannot be deleted or demoted from the owner role.
 
-The wizard can continue with recipe deployment or use an Existing Server Data path. Existing data mode validates path safety plus `server.cfg`/`resources` presence, then attaches that folder as the default deployment target for later Expert Mode use.
+Onboarding is first-run only. After setup is completed (or intentionally skipped into Expert Mode), `/onboarding` redirects back into the app and onboarding is not shown in normal navigation.
+
+The wizard can continue with recipe deployment or use an Existing Server Data path. Existing data mode validates path safety plus `server.cfg`/`resources` presence, then attaches that folder as the default deployment target for later Expert Mode use. It never executes recipe tasks or mutates server files during attach.
 
 The internal database is stored at:
 
@@ -61,6 +63,26 @@ PORTSIDE_DATA_PATH=".portside"
 ```
 
 This database is for Portside's own admins, roles, sessions, auth attempts, admin action logs, player records, sessions, notes, ban templates, and moderation actions. It is separate from the MySQL/MariaDB game database used by the Database Explorer.
+
+## Authentication And Provider Login
+
+Portside supports both username/password login and optional Cfx.re provider login. Password auth remains the required fallback in this phase so provider outages do not lock out admins.
+
+To enable Cfx.re provider auth, configure:
+
+```env
+PORTSIDE_CFX_CLIENT_ID=""
+PORTSIDE_CFX_CLIENT_SECRET=""
+PORTSIDE_CFX_REDIRECT_URI=""
+```
+
+If `PORTSIDE_CFX_REDIRECT_URI` is not set, Portside defaults to:
+
+```text
+{PORTSIDE_PUBLIC_URL or local panel URL}/api/auth/cfx/callback
+```
+
+Admins with `manage.admins` can link/unlink Cfx identities in Role Management. Provider identities are unique and cannot be linked to multiple admins. Provider secrets and tokens are never exposed in diagnostics bundles or UI payloads.
 
 ## FiveM Integration
 

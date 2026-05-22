@@ -18,7 +18,7 @@ export const sanitizeUser = (user: AuthUser) => ({
   isOwner: user.isOwner,
 });
 
-const requestIp = (req: Request) => {
+export const requestIp = (req: Request) => {
   const forwarded = req.headers['x-forwarded-for'];
   if (typeof forwarded === 'string') return forwarded.split(',')[0].trim();
   return req.ip || req.socket.remoteAddress || 'unknown';
@@ -26,6 +26,25 @@ const requestIp = (req: Request) => {
 
 export const signSessionToken = (sessionId: string) => {
   return jwt.sign({ sessionId }, jwtSecret(), { expiresIn: '24h' });
+};
+
+export const createSessionForAdmin = (store: PortsideStore, adminId: string) => {
+  const admin = store.getAdminById(adminId);
+  if (!admin || !admin.enabled) {
+    throw new Error('Admin account is disabled or missing');
+  }
+  const session = store.createSession(admin.id);
+  const token = signSessionToken(session.id);
+  const user = {
+    id: admin.id,
+    username: admin.username,
+    roleId: admin.roleId,
+    role: admin.role,
+    permissions: admin.permissions,
+    sessionId: session.id,
+    isOwner: admin.isOwner,
+  };
+  return { token, user };
 };
 
 export const createAuthMiddleware = (store: PortsideStore) => {
@@ -141,18 +160,7 @@ export const login = async (store: PortsideStore, req: Request, res: Response) =
 
   const admin = store.getAdminByUsername(username);
   if (!admin) return res.status(401).json({ error: 'Invalid credentials' });
-
-  const session = store.createSession(admin.id);
-  const token = signSessionToken(session.id);
-  const user = {
-    id: admin.id,
-    username: admin.username,
-    roleId: admin.roleId,
-    role: admin.role,
-    permissions: admin.permissions,
-    sessionId: session.id,
-    isOwner: admin.isOwner,
-  };
+  const { token, user } = createSessionForAdmin(store, admin.id);
 
   store.logAction({
     actorAdminId: admin.id,
@@ -218,17 +226,7 @@ export const createOwnerSession = async (
   const admin = store.createOwner(input.username, passwordHash);
   if (!admin) return { status: 500, error: 'Failed to create owner admin' } as const;
 
-  const session = store.createSession(admin.id);
-  const token = signSessionToken(session.id);
-  const user = {
-    id: admin.id,
-    username: admin.username,
-    roleId: admin.roleId,
-    role: admin.role,
-    permissions: admin.permissions,
-    sessionId: session.id,
-    isOwner: admin.isOwner,
-  };
+  const { token, user } = createSessionForAdmin(store, admin.id);
 
   store.logAction({
     actorAdminId: admin.id,

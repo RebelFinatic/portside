@@ -3,7 +3,7 @@ import path from 'path';
 import { readFileSync } from 'fs';
 import mysql from 'mysql2/promise';
 import bcrypt from 'bcryptjs';
-import { PERMISSIONS } from './permissions';
+import { PERMISSIONS, hasPermission } from './permissions';
 import type { OnboardingDeploymentSource, OnboardingMilestone, PortsideStore } from './store';
 import type { LogFamily, MemoryLogger } from './logging';
 import type { AuthedRequest } from './types';
@@ -38,13 +38,16 @@ import {
 import { getUpdateChangelog, getUpdateStatus, refreshUpdatesWithFallback } from './updates';
 import {
   createAuthMiddleware,
+  createSessionForAdmin,
   createOwner,
   createOwnerSession,
   login,
   logout,
+  requestIp,
   requirePermission,
   sanitizeUser,
 } from './auth';
+import { createProviderAuthStartUrl, getProviderSummary, resolveCfxProviderProfile } from './providerAuth';
 
 const configFiles = ['server.cfg'];
 
@@ -524,10 +527,213 @@ export const registerApiRoutes = (
     });
   });
 
+  app.get('/api/auth/providers', (_req, res) => {
+    res.json(getProviderSummary());
+  });
+
+  app.get('/api/auth/cfx/start', (req, res) => {
+    try {
+      const returnTo = safeFrontendPath(typeof req.query.returnTo === 'string' ? req.query.returnTo : null, '/login');
+      const startUrl = createProviderAuthStartUrl(store, { mode: 'login', returnTo });
+      res.redirect(startUrl);
+    } catch (error: any) {
+      const destination = `${frontendBaseUrl()}/login?provider=cfx&status=error&reason=${encodeURIComponent(error.message || 'Provider not configured')}`;
+      res.redirect(destination);
+    }
+  });
+
+  app.get('/api/auth/cfx/callback', async (req, res) => {
+    const error = typeof req.query.error === 'string' ? req.query.error : '';
+    const errorDescription = typeof req.query.error_description === 'string' ? req.query.error_description : '';
+    const code = typeof req.query.code === 'string' ? req.query.code : '';
+    const stateValue = typeof req.query.state === 'string' ? req.query.state : '';
+    const [stateId, nonce] = stateValue.split('.');
+
+    const redirectWithStatus = (path: string, status: string, reason?: string, token?: string) => {
+      const url = new URL(`${frontendBaseUrl()}${safeFrontendPath(path, '/login')}`);
+      url.searchParams.set('provider', 'cfx');
+      url.searchParams.set('status', status);
+      if (reason) url.searchParams.set('reason', reason);
+      if (token) url.searchParams.set('token', token);
+      res.redirect(url.toString());
+    };
+
+    if (error) {
+      redirectWithStatus('/login', 'error', errorDescription || error);
+      return;
+    }
+
+    if (!code || !stateId || !nonce) {
+      redirectWithStatus('/login', 'error', 'Missing auth callback parameters');
+      return;
+    }
+
+    let state: any = null;
+    try {
+      state = store.consumeProviderAuthState(stateId, nonce);
+    } catch (stateError: any) {
+      redirectWithStatus('/login', 'error', stateError.message || 'Invalid auth state');
+      return;
+    }
+    if (!state) {
+      redirectWithStatus('/login', 'error', 'Invalid auth state');
+      return;
+    }
+
+    const ip = requestIp(req);
+    try {
+      const profile = await resolveCfxProviderProfile(code);
+      const usernameMarker = `cfx:${profile.providerUserId}`;
+
+      if (state.mode === 'link') {
+        const actor = state.actorAdminId ? store.getAdminById(state.actorAdminId) : null;
+        const target = state.targetAdminId ? store.getAdminById(state.targetAdminId) : actor;
+        if (!actor || !target) {
+          store.recordAuthAttempt(usernameMarker, ip, false, 'provider_link_missing_admin');
+          redirectWithStatus(state.returnTo || '/roles', 'error', 'Admin link target no longer exists');
+          return;
+        }
+        if (!hasPermission(actor.permissions, 'manage.admins')) {
+          store.recordAuthAttempt(usernameMarker, ip, false, 'provider_link_denied');
+          redirectWithStatus(state.returnTo || '/roles', 'error', 'Missing permission to link provider identity');
+          return;
+        }
+
+        const linked = store.linkAdminProviderIdentity({
+          adminId: target.id,
+          provider: 'cfx',
+          providerUserId: profile.providerUserId,
+          displayName: profile.displayName,
+          identifiers: profile.identifiers,
+        });
+        store.recordAuthAttempt(usernameMarker, ip, true, 'provider_link_success');
+        store.logAction({
+          actorAdminId: actor.id,
+          actorUsername: actor.username,
+          action: 'auth.provider.link',
+          method: req.method,
+          route: req.originalUrl,
+          permission: 'manage.admins',
+          status: 'success',
+          ip,
+          details: { provider: 'cfx', targetAdminId: target.id, identityId: linked.id },
+        });
+        redirectWithStatus(state.returnTo || '/roles', 'linked', undefined);
+        return;
+      }
+
+      const identity = store.getProviderIdentityByProviderUserId('cfx', profile.providerUserId);
+      if (!identity) {
+        store.recordAuthAttempt(usernameMarker, ip, false, 'provider_identity_not_linked');
+        store.logAction({
+          actorUsername: usernameMarker,
+          action: 'auth.provider.login_failed',
+          method: req.method,
+          route: req.originalUrl,
+          status: 'denied',
+          ip,
+          details: { provider: 'cfx', reason: 'identity_not_linked' },
+        });
+        redirectWithStatus(state.returnTo || '/login', 'error', 'This Cfx account is not linked to a Portside admin');
+        return;
+      }
+
+      store.linkAdminProviderIdentity({
+        adminId: identity.adminId,
+        provider: 'cfx',
+        providerUserId: profile.providerUserId,
+        displayName: profile.displayName,
+        identifiers: profile.identifiers,
+      });
+
+      const { token } = createSessionForAdmin(store, identity.adminId);
+      store.recordAuthAttempt(usernameMarker, ip, true, 'provider_login_success');
+      store.logAction({
+        actorAdminId: identity.adminId,
+        actorUsername: identity.adminUsername,
+        action: 'auth.provider.login',
+        method: req.method,
+        route: req.originalUrl,
+        status: 'success',
+        ip,
+        details: { provider: 'cfx' },
+      });
+      redirectWithStatus(state.returnTo || '/', 'success', undefined, token);
+    } catch (callbackError: any) {
+      store.recordAuthAttempt('cfx', ip, false, 'provider_callback_failed');
+      store.logAction({
+        actorUsername: 'cfx',
+        action: 'auth.provider.login_failed',
+        method: req.method,
+        route: req.originalUrl,
+        status: 'denied',
+        ip,
+        details: { provider: 'cfx', error: callbackError.message || 'Provider callback failed' },
+      });
+      redirectWithStatus(state.returnTo || '/login', 'error', callbackError.message || 'Provider callback failed');
+    }
+  });
+
   app.post('/api/auth/logout', authenticateToken, (req: AuthedRequest, res) => logout(store, req, res));
 
   app.get('/api/auth/verify', authenticateToken, (req: AuthedRequest, res) => {
     res.json({ user: sanitizeUser(req.user!) });
+  });
+
+  app.get('/api/auth/identities', authenticateToken, requirePermission(store, 'manage.admins'), (_req, res) => {
+    res.json({ identities: store.listAdminProviderIdentities() });
+  });
+
+  app.post('/api/auth/identities/link', authenticateToken, requirePermission(store, 'manage.admins'), (req: AuthedRequest, res) => {
+    try {
+      const targetAdminId = typeof req.body?.adminId === 'string' ? req.body.adminId : req.user?.id || '';
+      const target = store.getAdminById(targetAdminId);
+      if (!target) return res.status(404).json({ error: 'Target admin not found' });
+      const returnTo = safeFrontendPath(typeof req.body?.returnTo === 'string' ? req.body.returnTo : null, '/roles');
+      const url = createProviderAuthStartUrl(store, {
+        mode: 'link',
+        actorAdminId: req.user?.id || null,
+        targetAdminId: targetAdminId,
+        returnTo,
+      });
+      store.logAction({
+        ...actionActor(req),
+        action: 'auth.provider.link_start',
+        method: req.method,
+        route: req.originalUrl,
+        permission: 'manage.admins',
+        status: 'success',
+        details: { provider: 'cfx', targetAdminId },
+      });
+      res.json({ url });
+    } catch (error: any) {
+      res.status(400).json({ error: error.message || 'Failed to start provider link flow' });
+    }
+  });
+
+  app.post('/api/auth/identities/unlink', authenticateToken, requirePermission(store, 'manage.admins'), (req: AuthedRequest, res) => {
+    const identityId = typeof req.body?.identityId === 'string' ? req.body.identityId : '';
+    if (!identityId) return res.status(400).json({ error: 'identityId is required' });
+    const identities = store.listAdminProviderIdentities();
+    const targetIdentity = identities.find(identity => identity.id === identityId);
+    if (!targetIdentity) return res.status(404).json({ error: 'Identity not found' });
+    const targetAdmin = store.getAdminById(targetIdentity.adminId);
+    if (targetAdmin?.isOwner && !store.hasPasswordLogin(targetAdmin.id)) {
+      return res.status(400).json({ error: 'Owner account would lose all login methods' });
+    }
+
+    const removed = store.unlinkAdminProviderIdentity(identityId);
+    if (!removed) return res.status(404).json({ error: 'Identity not found' });
+    store.logAction({
+      ...actionActor(req),
+      action: 'auth.provider.unlink',
+      method: req.method,
+      route: req.originalUrl,
+      permission: 'manage.admins',
+      status: 'success',
+      details: { provider: removed.provider, targetAdminId: removed.adminId, identityId: removed.id },
+    });
+    res.json({ success: true });
   });
 
   app.get('/api/onboarding/state', authenticateToken, requirePermission(store, 'control.server'), (req: AuthedRequest, res) => {
@@ -572,9 +778,15 @@ export const registerApiRoutes = (
       milestoneTimestamp: milestone ? new Date().toISOString() : undefined,
     });
 
+    const actionName = completed
+      ? 'onboarding.complete'
+      : skipped
+        ? 'onboarding.skip'
+        : 'onboarding.state.update';
+
     store.logAction({
       ...actionActor(req),
-      action: 'onboarding.state.update',
+      action: actionName,
       method: req.method,
       route: req.originalUrl,
       permission: 'control.server',
@@ -624,7 +836,9 @@ export const registerApiRoutes = (
     const state = store.upsertOnboardingState(adminId, {
       milestone: 'go_live_ready',
       completed: true,
+      skipped: false,
       completedAt: new Date().toISOString(),
+      skippedAt: null,
       milestoneTimestamp: new Date().toISOString(),
     });
     store.logAction({
@@ -1882,3 +2096,10 @@ export const registerApiRoutes = (
     res.json(user);
   });
 };
+  const frontendBaseUrl = () => (process.env.PORTSIDE_PUBLIC_URL || process.env.TXHOST_TXA_URL || `http://127.0.0.1:${process.env.PORTSIDE_PORT || '3000'}`).replace(/\/+$/, '');
+  const safeFrontendPath = (input: string | null | undefined, fallback: string) => {
+    if (!input || typeof input !== 'string') return fallback;
+    if (!input.startsWith('/')) return fallback;
+    if (input.startsWith('/api/')) return fallback;
+    return input;
+  };

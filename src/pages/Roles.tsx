@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { apiFetch } from '../lib/api';
 import { ShieldCheck, Plus, Trash2, Edit, Save, X, User, AlertTriangle, Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
+import { getPermissionMeta } from '../lib/permissionLabels';
 
 const AVAILABLE_PERMISSIONS = [
   'all_permissions',
@@ -52,6 +53,16 @@ interface PlatformUser {
   isOwner?: boolean;
 }
 
+interface LinkedIdentity {
+  id: string;
+  adminId: string;
+  adminUsername: string;
+  provider: 'cfx';
+  providerUserId: string;
+  displayName: string;
+  identifiers: string[];
+}
+
 export default function Roles() {
   const [roles, setRoles] = useState<Role[]>([]);
   const [users, setUsers] = useState<PlatformUser[]>([]);
@@ -64,9 +75,25 @@ export default function Roles() {
   const [newAdmin, setNewAdmin] = useState({ username: '', password: '', roleId: '' });
   const [identifierDrafts, setIdentifierDrafts] = useState<Record<string, string>>({});
   const [adminLoading, setAdminLoading] = useState(false);
+  const [identities, setIdentities] = useState<LinkedIdentity[]>([]);
+  const [identityLoading, setIdentityLoading] = useState(false);
 
   useEffect(() => {
     fetchData();
+  }, []);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('provider') !== 'cfx') return;
+    const status = params.get('status');
+    const reason = params.get('reason');
+    if (status === 'linked') {
+      toast.success('Cfx identity linked');
+      fetchData();
+    } else if (status === 'error') {
+      toast.error(reason || 'Cfx identity flow failed');
+    }
+    window.history.replaceState({}, '', window.location.pathname);
   }, []);
 
   const fetchData = async () => {
@@ -79,6 +106,8 @@ export default function Roles() {
       setRoles(rolesData);
       setUsers(usersData);
       setIdentifierDrafts(Object.fromEntries(usersData.map((user: PlatformUser) => [user.id, (user.identifiers || []).join('\n')])));
+      const identityResponse = await apiFetch('/auth/identities');
+      setIdentities(identityResponse.identities || []);
     } catch (err) {
       toast.error('Failed to load roles and users');
     } finally {
@@ -188,8 +217,45 @@ export default function Roles() {
     }
   };
 
+  const handleStartIdentityLink = async (adminId: string) => {
+    setIdentityLoading(true);
+    try {
+      const response = await apiFetch('/auth/identities/link', {
+        method: 'POST',
+        body: JSON.stringify({ adminId, returnTo: '/roles' }),
+      });
+      window.location.href = response.url;
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to start identity linking');
+      setIdentityLoading(false);
+    }
+  };
+
+  const handleUnlinkIdentity = async (identityId: string) => {
+    setIdentityLoading(true);
+    try {
+      await apiFetch('/auth/identities/unlink', {
+        method: 'POST',
+        body: JSON.stringify({ identityId }),
+      });
+      setIdentities(prev => prev.filter(identity => identity.id !== identityId));
+      toast.success('Identity unlinked');
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to unlink identity');
+    } finally {
+      setIdentityLoading(false);
+    }
+  };
+
   if (loading && roles.length === 0) {
-    return <div className="p-8 text-center text-zinc-500">Loading roles...</div>;
+    return (
+      <div className="flex flex-1 items-center justify-center p-8">
+        <div className="flex items-center gap-3 text-sm text-zinc-400">
+          <Loader2 className="h-5 w-5 animate-spin text-orange-500" />
+          Loading roles...
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -347,6 +413,69 @@ export default function Roles() {
         </div>
       </div>
 
+      <div className="mt-8 rounded-xl border border-zinc-800 bg-[#111] p-5">
+        <div className="mb-4 flex items-center justify-between">
+          <h2 className="text-sm font-bold text-zinc-300 uppercase tracking-widest">Linked Provider Identities</h2>
+          {identityLoading && <Loader2 className="h-4 w-4 animate-spin text-zinc-500" />}
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full border-collapse text-left">
+            <thead>
+              <tr className="border-b border-zinc-800 text-[10px] uppercase tracking-widest text-zinc-500">
+                <th className="px-3 py-2">Admin</th>
+                <th className="px-3 py-2">Provider</th>
+                <th className="px-3 py-2">Identity</th>
+                <th className="px-3 py-2">Identifiers</th>
+                <th className="px-3 py-2 text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {users.map(user => {
+                const identity = identities.find(item => item.adminId === user.id);
+                return (
+                  <tr key={user.id} className="border-b border-zinc-900">
+                    <td className="px-3 py-3 text-sm text-white">{user.username}</td>
+                    <td className="px-3 py-3 text-xs text-zinc-400">{identity?.provider || '-'}</td>
+                    <td className="px-3 py-3 text-xs text-zinc-400">
+                      {identity ? (
+                        <div>
+                          <div className="text-zinc-200">{identity.displayName}</div>
+                          <div className="font-mono text-[10px] text-zinc-600">{identity.providerUserId}</div>
+                        </div>
+                      ) : 'Not linked'}
+                    </td>
+                    <td className="px-3 py-3 text-xs text-zinc-500">
+                      {identity?.identifiers?.length ? identity.identifiers.join(', ') : '-'}
+                    </td>
+                    <td className="px-3 py-3 text-right">
+                      {identity ? (
+                        <button
+                          type="button"
+                          onClick={() => handleUnlinkIdentity(identity.id)}
+                          disabled={identityLoading}
+                          className="rounded border border-red-500/20 bg-red-500/10 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-red-300 hover:bg-red-500/20 disabled:opacity-50"
+                        >
+                          Unlink
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => handleStartIdentityLink(user.id)}
+                          disabled={identityLoading}
+                          className="rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
+                        >
+                          Link Cfx
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
       {/* Role Editor Modal */}
       {editingRole && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in duration-200">
@@ -382,23 +511,29 @@ export default function Roles() {
                 <label className="block text-xs font-bold text-zinc-400 uppercase tracking-widest mb-3">
                   Permissions
                 </label>
-                <div className="grid grid-cols-2 gap-2 max-h-[300px] overflow-y-auto pr-2">
+                <div className="grid grid-cols-1 gap-2 max-h-[320px] overflow-y-auto pr-2">
                   {AVAILABLE_PERMISSIONS.map(perm => {
                     const isSelected = editingRole.permissions.includes(perm);
+                    const meta = getPermissionMeta(perm);
                     return (
                       <button
                         key={perm}
+                        type="button"
                         onClick={() => togglePermission(perm)}
-                        className={`text-left flex items-center gap-2 px-3 py-2 rounded-lg border text-xs font-mono transition-colors ${
-                          isSelected 
-                            ? 'bg-orange-600/10 border-orange-600/30 text-orange-400' 
-                            : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-300'
+                        className={`text-left flex items-start gap-3 px-3 py-2.5 rounded-lg border transition-colors ${
+                          isSelected
+                            ? 'bg-orange-600/10 border-orange-600/30'
+                            : 'bg-zinc-900 border-zinc-800 hover:bg-zinc-800'
                         }`}
                       >
-                        <div className={`w-3 h-3 rounded flex-shrink-0 border ${isSelected ? 'border-orange-500 bg-orange-500' : 'border-zinc-600 bg-transparent'}`}></div>
-                        {perm}
+                        <div className={`mt-0.5 w-3 h-3 rounded flex-shrink-0 border ${isSelected ? 'border-orange-500 bg-orange-500' : 'border-zinc-600 bg-transparent'}`} />
+                        <div className="min-w-0">
+                          <div className={`text-sm font-semibold ${isSelected ? 'text-orange-300' : 'text-zinc-200'}`}>{meta.label}</div>
+                          <div className="text-[10px] font-mono text-zinc-600">{perm}</div>
+                          <div className="mt-0.5 text-xs text-zinc-500 leading-snug">{meta.description}</div>
+                        </div>
                       </button>
-                    )
+                    );
                   })}
                 </div>
               </div>

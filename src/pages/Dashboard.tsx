@@ -36,6 +36,7 @@ import { formatDistanceToNowStrict } from 'date-fns';
 import { apiFetch } from '../lib/api';
 import { toast } from 'sonner';
 import { useAuthStore } from '../store/useAuthStore';
+import ConfirmModal from '../components/ConfirmModal';
 
 interface ServerStatus {
   online: boolean;
@@ -123,6 +124,7 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [controlAction, setControlAction] = useState<string | null>(null);
+  const [pendingControlAction, setPendingControlAction] = useState<'stop' | 'restart' | null>(null);
   const [controlReason, setControlReason] = useState('Routine server maintenance');
   const [scheduleTime, setScheduleTime] = useState('06:00');
   const [scheduleMessage, setScheduleMessage] = useState('Scheduled restart by Portside');
@@ -175,6 +177,25 @@ export default function Dashboard() {
     return () => window.clearInterval(interval);
   }, [hasServerControl]);
 
+  const managedControlsEnabled = fxStatus?.mode === 'managed' && fxStatus?.enabled !== false;
+
+  const requestControlAction = (action: 'start' | 'stop' | 'restart') => {
+    if (!managedControlsEnabled) {
+      toast.error('Server lifecycle controls require managed FXServer mode');
+      return;
+    }
+    if (action === 'stop' || action === 'restart') {
+      const reason = controlReason.trim();
+      if (!reason) {
+        toast.error('Reason is required');
+        return;
+      }
+      setPendingControlAction(action);
+      return;
+    }
+    void runControlAction(action);
+  };
+
   const runControlAction = async (action: 'start' | 'stop' | 'restart') => {
     const reason = controlReason.trim();
     if ((action === 'stop' || action === 'restart') && !reason) {
@@ -182,6 +203,7 @@ export default function Dashboard() {
       return;
     }
 
+    setPendingControlAction(null);
     setControlAction(action);
     try {
       const nextStatus = await apiFetch(`/server/control/${action}`, {
@@ -456,10 +478,37 @@ export default function Dashboard() {
               className="mt-4 w-full rounded border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-white outline-none focus:border-orange-600"
               placeholder="Reason for stop/restart"
             />
+            {!managedControlsEnabled && (
+              <p className="mt-3 text-xs text-zinc-500">
+                Start/stop/restart are only available when Portside runs FXServer in managed mode.
+              </p>
+            )}
             <div className="mt-3 grid grid-cols-3 gap-2">
-              <ControlButton label="Start" icon={<Play className="h-3.5 w-3.5" />} loading={controlAction === 'start'} onClick={() => runControlAction('start')} />
-              <ControlButton label="Stop" icon={<Square className="h-3.5 w-3.5" />} loading={controlAction === 'stop'} onClick={() => runControlAction('stop')} danger />
-              <ControlButton label="Restart" icon={<RotateCcw className="h-3.5 w-3.5" />} loading={controlAction === 'restart'} onClick={() => runControlAction('restart')} />
+              <ControlButton
+                label="Start"
+                icon={<Play className="h-3.5 w-3.5" />}
+                loading={controlAction === 'start'}
+                disabled={!managedControlsEnabled}
+                title={managedControlsEnabled ? undefined : 'Requires managed FXServer mode'}
+                onClick={() => requestControlAction('start')}
+              />
+              <ControlButton
+                label="Stop"
+                icon={<Square className="h-3.5 w-3.5" />}
+                loading={controlAction === 'stop'}
+                disabled={!managedControlsEnabled}
+                title={managedControlsEnabled ? undefined : 'Requires managed FXServer mode'}
+                onClick={() => requestControlAction('stop')}
+                danger
+              />
+              <ControlButton
+                label="Restart"
+                icon={<RotateCcw className="h-3.5 w-3.5" />}
+                loading={controlAction === 'restart'}
+                disabled={!managedControlsEnabled}
+                title={managedControlsEnabled ? undefined : 'Requires managed FXServer mode'}
+                onClick={() => requestControlAction('restart')}
+              />
             </div>
             {fxStatus?.lastExitReason && (
               <p className="mt-3 line-clamp-2 text-xs text-zinc-500">Last reason: {fxStatus.lastExitReason}</p>
@@ -514,6 +563,28 @@ export default function Dashboard() {
           {hasSettingsView && <QuickAction to="/diagnostics" icon={<Activity className="h-4 w-4" />} title="Diagnostics" description="Check runtime health and export a support bundle." />}
         </div>
       </Panel>
+
+      <ConfirmModal
+        open={pendingControlAction === 'stop'}
+        title="Stop FXServer?"
+        description="This will stop the managed FXServer process. All connected players will be disconnected."
+        confirmLabel="Stop Server"
+        danger
+        loading={controlAction === 'stop'}
+        onConfirm={() => runControlAction('stop')}
+        onCancel={() => setPendingControlAction(null)}
+      />
+
+      <ConfirmModal
+        open={pendingControlAction === 'restart'}
+        title="Restart FXServer?"
+        description="This will restart the managed FXServer process. Players may be disconnected during the restart."
+        confirmLabel="Restart Server"
+        danger
+        loading={controlAction === 'restart'}
+        onConfirm={() => runControlAction('restart')}
+        onCancel={() => setPendingControlAction(null)}
+      />
     </div>
   );
 }
@@ -647,18 +718,23 @@ function ControlButton({
   icon,
   loading,
   danger,
+  disabled,
+  title,
   onClick,
 }: {
   label: string;
   icon: ReactNode;
   loading: boolean;
   danger?: boolean;
+  disabled?: boolean;
+  title?: string;
   onClick: () => void;
 }) {
   return (
     <button
       onClick={onClick}
-      disabled={loading}
+      disabled={loading || disabled}
+      title={title}
       className={`inline-flex items-center justify-center gap-2 rounded border px-3 py-2 text-xs font-bold uppercase tracking-wider transition-colors disabled:opacity-60 ${
         danger
           ? 'border-red-900/70 bg-red-950/30 text-red-300 hover:border-red-700'

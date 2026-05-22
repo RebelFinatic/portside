@@ -75,6 +75,13 @@ const defaultVariables: Record<string, string> = {
 };
 
 const sensitivePattern = /(password|secret|token|license|connection|string|key)/i;
+const impactSummaryLabel: Record<string, string> = {
+  create: 'Create',
+  overwrite: 'Overwrite',
+  delete: 'Delete',
+  download: 'Download',
+  db: 'Database',
+};
 
 const wizardSteps = [
   { title: 'Owner Account', description: 'Create the first administrator.' },
@@ -139,19 +146,25 @@ export default function Onboarding() {
   const [confirmationToken, setConfirmationToken] = useState('');
   const [goLiveChecks, setGoLiveChecks] = useState<Record<string, unknown> | null>(null);
   const [existingValidation, setExistingValidation] = useState<ExistingValidation | null>(null);
+  const [validationFresh, setValidationFresh] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [variables, setVariables] = useState<Record<string, string>>(defaultVariables);
   const [ownerUsername, setOwnerUsername] = useState('');
   const [ownerPassword, setOwnerPassword] = useState('');
   const [ownerPasswordConfirm, setOwnerPasswordConfirm] = useState('');
   const isMountedRef = useRef(true);
   const suppressToastsRef = useRef(false);
+  const loadTokenRef = useRef(0);
 
   const ownerStepRequired = !wizardStatus?.hasOwner;
 
   const load = async () => {
+    const token = ++loadTokenRef.current;
     setLoading(true);
+    setLoadError(null);
     try {
       const status = await apiFetch('/setup/wizard/state');
+      if (!isMountedRef.current || token !== loadTokenRef.current) return;
       setWizardStatus(status);
       setTargetPath(status.defaultTargetPath || '');
 
@@ -160,6 +173,7 @@ export default function Onboarding() {
           apiFetch('/onboarding/state'),
           apiFetch('/deployer/catalog'),
         ]);
+        if (!isMountedRef.current || token !== loadTokenRef.current) return;
         if (onboardingState.completed || onboardingState.skipped) {
           navigate('/', { replace: true });
           return;
@@ -175,6 +189,9 @@ export default function Onboarding() {
         setStep(0);
       }
     } catch (error: any) {
+      if (isMountedRef.current && token === loadTokenRef.current) {
+        setLoadError(error.message || 'Failed to load onboarding');
+      }
       if (suppressToastsRef.current || !isMountedRef.current) return;
       toast.error('Failed to load onboarding', { description: error.message });
     } finally {
@@ -285,17 +302,18 @@ export default function Onboarding() {
           body: JSON.stringify({ targetPath }),
         });
         setExistingValidation(validation);
+        setValidationFresh(true);
         if (!validation.ok) {
           toast.error('Existing server data validation failed');
           return;
         }
         await updateOnboarding({
           deploymentSource: 'existing-data',
-          milestone: 'deployment_applied',
-          attachedTargetPath: validation.targetPath,
+          milestone: 'recipe_selected',
+          attachedTargetPath: null,
         });
-        setStep(5);
-        toast.success('Existing server data attached');
+        setStep(3);
+        toast.success('Validation passed. Attach when ready.');
         return;
       }
 
@@ -315,6 +333,29 @@ export default function Onboarding() {
     } catch (error: any) {
       if (suppressToastsRef.current || !isMountedRef.current) return;
       toast.error('Recipe step failed', { description: error.message });
+    } finally {
+      if (isMountedRef.current) setWorking(false);
+    }
+  };
+
+  const attachExistingData = async () => {
+    ensureAuthenticatedForWizard();
+    if (source !== 'existing-data') return;
+    if (!existingValidation?.ok || !validationFresh || !existingValidation.targetPath) {
+      toast.error('Validate the folder again before attaching');
+      return;
+    }
+    setWorking(true);
+    try {
+      await updateOnboarding({
+        deploymentSource: 'existing-data',
+        milestone: 'deployment_applied',
+        attachedTargetPath: existingValidation.targetPath,
+      });
+      setStep(5);
+      toast.success('Existing server data attached without running recipe tasks');
+    } catch (error: any) {
+      toast.error('Failed to attach existing server data', { description: error.message });
     } finally {
       if (isMountedRef.current) setWorking(false);
     }
@@ -422,6 +463,22 @@ export default function Onboarding() {
     return groups;
   }, [inspection]);
 
+  useEffect(() => {
+    if (source !== 'existing-data') return;
+    setExistingValidation(null);
+    setValidationFresh(false);
+  }, [source]);
+
+  useEffect(() => {
+    if (source !== 'existing-data') return;
+    setValidationFresh(false);
+    setExistingValidation(prev => {
+      if (!prev) return prev;
+      const warnings = (prev.warnings || []).filter(item => item !== 'Path changed. Validate again before attach.');
+      return { ...prev, ok: false, warnings: [...warnings, 'Path changed. Validate again before attach.'] };
+    });
+  }, [targetPath, source]);
+
   const activeStepIndex = ownerStepRequired ? 0 : Math.min(Math.max(step, 1), wizardSteps.length - 1);
   const selectedSourceOption = sourceOptions.find(option => option.id === source) || sourceOptions[0];
   const selectedRecipe = catalog.find(recipe => recipe.id === selectedRecipeId) || null;
@@ -430,6 +487,24 @@ export default function Onboarding() {
     return (
       <div className="flex min-h-screen items-center justify-center bg-[#0a0a0a]">
         <Loader2 className="h-5 w-5 animate-spin text-orange-500" />
+      </div>
+    );
+  }
+
+  if (loadError && !wizardStatus) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-[#0a0a0a] px-4">
+        <div className="w-full max-w-md rounded-lg border border-zinc-800 bg-[#111] p-5 text-center">
+          <div className="text-sm font-semibold text-white">Onboarding could not be loaded</div>
+          <p className="mt-2 text-xs text-zinc-500">{loadError}</p>
+          <button
+            type="button"
+            onClick={load}
+            className="mt-4 rounded bg-orange-600 px-4 py-2 text-xs font-bold uppercase text-white hover:bg-orange-500"
+          >
+            Retry
+          </button>
+        </div>
       </div>
     );
   }
@@ -551,6 +626,21 @@ export default function Onboarding() {
                 </div>
               )}
 
+              {step === 3 && source === 'existing-data' && (
+                <div className="max-w-3xl space-y-4">
+                  <div className="rounded border border-zinc-800 bg-black/20 p-4 text-sm text-zinc-400">
+                    Existing data mode does not execute recipe tasks. Portside only validates and attaches this folder as your default deployment target.
+                  </div>
+                  {existingValidation ? (
+                    <ValidationCard validation={existingValidation} />
+                  ) : (
+                    <div className="rounded border border-zinc-800 bg-black/20 p-4 text-sm text-zinc-500">
+                      Validate your folder to continue.
+                    </div>
+                  )}
+                </div>
+              )}
+
               {step === 3 && source !== 'existing-data' && inspection && (
                 <div>
                   {inspection.warnings?.length ? <WarningList warnings={inspection.warnings} /> : null}
@@ -566,7 +656,7 @@ export default function Onboarding() {
                     {Object.entries(plan.impactSummary || {}).map(([key, value]) => (
                       <div key={key} className="rounded-lg border border-zinc-800 bg-black/20 p-3">
                         <div className="text-lg font-semibold text-white">{String(value)}</div>
-                        <div className="text-[10px] uppercase tracking-wider text-zinc-600">{key}</div>
+                        <div className="text-[10px] uppercase tracking-wider text-zinc-600">{impactSummaryLabel[key] || key}</div>
                       </div>
                     ))}
                   </div>
@@ -619,6 +709,14 @@ export default function Onboarding() {
               ) : step === 2 ? (
                 <PrimaryButton onClick={inspectRecipe} disabled={working || !targetPath.trim() || (source === 'catalog' && !selectedRecipeId) || (source === 'remote-url' && !customUrl.trim()) || (source === 'custom-yaml' && !customYaml.trim())}>
                   {working ? 'Working...' : (source === 'existing-data' ? 'Validate And Attach' : 'Inspect Recipe')}
+                </PrimaryButton>
+              ) : step === 3 && source === 'existing-data' ? (
+                <PrimaryButton
+                  tone="success"
+                  onClick={attachExistingData}
+                  disabled={working || !validationFresh || !existingValidation?.ok}
+                >
+                  {working ? 'Attaching...' : 'Attach Folder'}
                 </PrimaryButton>
               ) : step === 3 && source !== 'existing-data' ? (
                 <PrimaryButton onClick={createPlan} disabled={working}>{working ? 'Planning...' : 'Create Plan'}</PrimaryButton>

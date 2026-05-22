@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type React from 'react';
-import { AlertTriangle, CheckCircle2, Database, Download, FileCode2, Loader2, PackageOpen, Play, RefreshCw, Search } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, Database, Download, FileCode2, Loader2, PackageOpen, Play, RefreshCw, Search, Square } from 'lucide-react';
 import { toast } from 'sonner';
 import { apiFetch } from '../lib/api';
+import ConfirmModal from '../components/ConfirmModal';
 
 interface CatalogEntry {
   id: string;
@@ -55,7 +56,6 @@ const defaultVariables: Record<string, string> = {
 };
 
 const sensitivePattern = /(password|secret|token|license|connection|string|key)/i;
-
 export default function Deployer() {
   const [catalog, setCatalog] = useState<CatalogEntry[]>([]);
   const [jobs, setJobs] = useState<DeployerJob[]>([]);
@@ -71,6 +71,9 @@ export default function Deployer() {
   const [loading, setLoading] = useState(true);
   const [inspecting, setInspecting] = useState(false);
   const [running, setRunning] = useState(false);
+  const [runConfirmOpen, setRunConfirmOpen] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
+  const jobLogRef = useRef<HTMLDivElement>(null);
 
   const selectedRecipe = catalog.find(recipe => recipe.id === selectedId) || null;
   const filteredCatalog = useMemo(() => {
@@ -96,6 +99,8 @@ export default function Deployer() {
     }
     return message;
   };
+
+  const formatApiError = (message: string) => describeLoadError(message || 'Request failed');
 
   const load = async () => {
     setLoading(true);
@@ -139,7 +144,7 @@ export default function Deployer() {
       setCatalog(response.recipes || []);
       toast.success('Recipe catalog refreshed');
     } catch (error: any) {
-      toast.error('Catalog refresh failed', { description: error.message });
+      toast.error('Catalog refresh failed', { description: formatApiError(error.message) });
       if (Array.isArray(error.recipes)) setCatalog(error.recipes);
     }
   };
@@ -165,7 +170,7 @@ export default function Deployer() {
       setVariables(filled);
       toast.success('Recipe inspected');
     } catch (error: any) {
-      toast.error('Recipe inspection failed', { description: error.message });
+      toast.error('Recipe inspection failed', { description: formatApiError(error.message) });
     } finally {
       setInspecting(false);
     }
@@ -177,8 +182,7 @@ export default function Deployer() {
       toast.error('Target path is required');
       return;
     }
-    const confirmed = window.confirm('Run this recipe now? It can create, overwrite, or remove files inside the selected target folder.');
-    if (!confirmed) return;
+    setRunConfirmOpen(false);
     setRunning(true);
     try {
       const job = await apiFetch('/deployer/jobs', {
@@ -192,9 +196,34 @@ export default function Deployer() {
       setJobs(jobResponse.jobs || []);
       toast.success(completed.status === 'success' ? 'Deployment finished' : 'Deployment failed');
     } catch (error: any) {
-      toast.error('Deployment failed', { description: error.message });
+      toast.error('Deployment failed', { description: formatApiError(error.message) });
     } finally {
       setRunning(false);
+    }
+  };
+
+  const cancelJob = async (jobId: string) => {
+    setCancelling(true);
+    try {
+      const cancelled = await apiFetch(`/deployer/jobs/${jobId}/cancel`, { method: 'POST' });
+      setActiveJob(cancelled);
+      toast.success('Deployment cancelled');
+    } catch (error: any) {
+      toast.error('Cancel failed', { description: formatApiError(error.message) });
+    } finally {
+      setCancelling(false);
+    }
+  };
+
+  const retryJob = async (jobId: string) => {
+    try {
+      const retried = await apiFetch(`/deployer/jobs/${jobId}/retry`, { method: 'POST' });
+      setActiveJob(retried);
+      const jobResponse = await apiFetch('/deployer/jobs');
+      setJobs(jobResponse.jobs || []);
+      toast.success(retried.status === 'success' ? 'Retry finished successfully' : 'Retry started');
+    } catch (error: any) {
+      toast.error('Retry failed', { description: formatApiError(error.message) });
     }
   };
 
@@ -298,7 +327,7 @@ export default function Deployer() {
                       </div>
                     ))}
                     <div className="flex justify-end">
-                      <button onClick={createAndRun} disabled={running} className="inline-flex items-center gap-2 rounded border border-emerald-500/30 bg-emerald-500/10 px-4 py-2 text-xs font-bold uppercase text-emerald-300 hover:bg-emerald-500/20 disabled:cursor-not-allowed disabled:opacity-50">
+                      <button onClick={() => setRunConfirmOpen(true)} disabled={running} className="inline-flex items-center gap-2 rounded border border-emerald-500/30 bg-emerald-500/10 px-4 py-2 text-xs font-bold uppercase text-emerald-300 hover:bg-emerald-500/20 disabled:cursor-not-allowed disabled:opacity-50">
                         {running ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
                         Run Deployment
                       </button>
@@ -312,7 +341,7 @@ export default function Deployer() {
 
             {inspection && (
               <section className="rounded-lg border border-zinc-800 bg-[#111]">
-                <PanelHeader icon={<FileCode2 className="h-4 w-4" />} title={`${String(inspection.metadata.name || selectedRecipe?.name || 'Recipe')} Tasks`} />
+                <PanelHeader icon={<FileCode2 className="h-4 w-4" />} title={`${String(inspection.metadata.name || selectedRecipe?.name || 'Recipe')} Plan Preview`} />
                 <div className="divide-y divide-zinc-900">
                   {inspection.tasks.map(task => (
                     <div key={task.index} className="grid grid-cols-1 gap-2 p-4 text-sm md:grid-cols-[80px_180px_minmax(0,1fr)] md:items-center">
@@ -329,7 +358,17 @@ export default function Deployer() {
           <aside className="space-y-6">
             <section className="rounded-lg border border-zinc-800 bg-[#111]">
               <PanelHeader icon={<Play className="h-4 w-4" />} title="Active Job" />
-              {activeJob ? <JobView job={activeJob} /> : <Empty text="No active deployer job." />}
+              {activeJob ? (
+                <JobView
+                  job={activeJob}
+                  onRetry={retryJob}
+                  onCancel={cancelJob}
+                  cancelling={cancelling}
+                  logRef={jobLogRef}
+                />
+              ) : (
+                <Empty text="No active deployer job." />
+              )}
             </section>
 
             <section className="rounded-lg border border-zinc-800 bg-[#111]">
@@ -351,6 +390,22 @@ export default function Deployer() {
           </aside>
         </div>
       )}
+
+      <ConfirmModal
+        open={runConfirmOpen}
+        title="Run deployment?"
+        description={
+          <>
+            This recipe will write files inside <span className="font-mono text-zinc-300">{targetPath || '(no path)'}</span>.
+            Files may be created, overwritten, or removed. Review the plan preview before continuing.
+          </>
+        }
+        confirmLabel="Run Deployment"
+        danger
+        loading={running}
+        onConfirm={createAndRun}
+        onCancel={() => setRunConfirmOpen(false)}
+      />
     </div>
   );
 }
@@ -381,34 +436,108 @@ function Field({ label, value, onChange, placeholder, type = 'text' }: { label: 
   );
 }
 
-function JobView({ job }: { job: DeployerJob }) {
+function JobView({
+  job,
+  onRetry,
+  onCancel,
+  cancelling,
+  logRef,
+}: {
+  job: DeployerJob;
+  onRetry: (jobId: string) => void;
+  onCancel: (jobId: string) => void;
+  cancelling: boolean;
+  logRef: React.RefObject<HTMLDivElement | null>;
+}) {
+  const canRetry = job.status === 'failed' || job.status === 'cancelled';
+  const canCancel = job.status === 'running' || job.status === 'pending';
+  const steps = job.steps || [];
+  const completedSteps = steps.filter(step => step.status === 'success' || step.status === 'failed' || step.status === 'skipped').length;
+  const progress = steps.length ? Math.round((completedSteps / steps.length) * 100) : 0;
+  const elapsedMs = job.startedAt ? Date.now() - new Date(job.startedAt).getTime() : 0;
+  const elapsedLabel = elapsedMs > 0
+    ? `${Math.floor(elapsedMs / 60000)}m ${Math.floor((elapsedMs % 60000) / 1000)}s`
+    : '—';
+
+  useEffect(() => {
+    const el = logRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+  }, [job.logs?.length, logRef]);
+
   return (
     <div className="space-y-4 p-4">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="truncate text-sm font-semibold text-white">{job.recipeName}</div>
           <div className="mt-1 truncate font-mono text-[10px] text-zinc-600">{job.id}</div>
+          {job.startedAt && (
+            <div className="mt-1 text-[10px] text-zinc-600">Elapsed: {elapsedLabel}</div>
+          )}
         </div>
         <StatusBadge status={job.status} />
       </div>
+
+      {steps.length > 0 && (
+        <div>
+          <div className="mb-1 flex justify-between text-[10px] font-bold uppercase tracking-wider text-zinc-500">
+            <span>Progress</span>
+            <span>{completedSteps}/{steps.length} ({progress}%)</span>
+          </div>
+          <div className="h-2 overflow-hidden rounded bg-zinc-900">
+            <div
+              className={`h-full transition-all ${job.status === 'running' ? 'bg-orange-500' : 'bg-emerald-500'}`}
+              style={{ width: `${progress}%` }}
+            />
+          </div>
+        </div>
+      )}
+
       {job.error && <div className="rounded border border-red-500/20 bg-red-500/10 p-3 text-xs text-red-200">{job.error}</div>}
+
+      <div className="flex flex-wrap gap-2">
+        {canCancel && (
+          <button
+            type="button"
+            onClick={() => onCancel(job.id)}
+            disabled={cancelling}
+            className="inline-flex items-center gap-2 rounded border border-red-500/30 bg-red-500/10 px-3 py-2 text-[11px] font-bold uppercase text-red-300 hover:bg-red-500/20 disabled:opacity-50"
+          >
+            {cancelling ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Square className="h-3.5 w-3.5" />}
+            Cancel Job
+          </button>
+        )}
+        {canRetry && (
+          <button
+            type="button"
+            onClick={() => onRetry(job.id)}
+            className="rounded border border-orange-500/30 bg-orange-500/10 px-3 py-2 text-[11px] font-bold uppercase text-orange-300 hover:bg-orange-500/20"
+          >
+            Retry From Last Safe Checkpoint
+          </button>
+        )}
+      </div>
+
       {job.validation && (
         <div className="rounded border border-zinc-800 bg-black/20 p-3 text-xs text-zinc-400">
           Validation: {job.validation.ok ? 'passed' : 'failed'}
         </div>
       )}
       <div className="max-h-72 space-y-2 overflow-y-auto">
-        {(job.steps || []).map(step => (
+        {steps.map(step => (
           <div key={step.id} className="rounded border border-zinc-800 bg-black/20 p-3">
             <div className="flex items-center justify-between gap-3">
-              <span className="truncate text-xs text-zinc-300">{step.label}</span>
+              <span className="truncate text-xs text-zinc-300 flex items-center gap-2">
+                {step.status === 'running' && <Loader2 className="h-3 w-3 shrink-0 animate-spin text-orange-400" />}
+                {step.label}
+              </span>
               <StatusBadge status={step.status} />
             </div>
             {step.error && <div className="mt-2 text-xs text-red-300">{step.error}</div>}
           </div>
         ))}
       </div>
-      <div className="max-h-56 overflow-y-auto rounded border border-zinc-800 bg-black/30 p-3 font-mono text-[11px] text-zinc-500">
+      <div ref={logRef} className="max-h-56 overflow-y-auto rounded border border-zinc-800 bg-black/30 p-3 font-mono text-[11px] text-zinc-500">
         {(job.logs || []).map(log => (
           <div key={log.id}><span className="text-zinc-700">{new Date(log.timestamp).toLocaleTimeString()}</span> [{log.level}] {log.message}</div>
         ))}

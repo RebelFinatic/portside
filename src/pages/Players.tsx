@@ -1,7 +1,11 @@
-import React, { useEffect, useMemo, useState } from 'react';
-import { Ban, FileText, History, Loader2, MessageSquareWarning, MoreHorizontal, Plus, RefreshCw, Search, Send, ShieldAlert, StickyNote, Users, X, Zap } from 'lucide-react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { Ban, ChevronLeft, ChevronRight, FileText, History, Loader2, MessageSquareWarning, MoreHorizontal, Plus, RefreshCw, Search, Send, ShieldAlert, StickyNote, Users, X, Zap } from 'lucide-react';
 import { apiFetch, hasPermission } from '../lib/api';
 import { toast } from 'sonner';
+import ConfirmModal from '../components/ConfirmModal';
+
+const PAGE_SIZE = 50;
+type ProfileFocus = 'actions' | 'dm' | null;
 
 interface PlayerRow {
   id?: string;
@@ -57,6 +61,14 @@ export default function Players() {
   const [kickAllConfirm, setKickAllConfirm] = useState('');
   const [openActionMenu, setOpenActionMenu] = useState('');
   const [actionLoading, setActionLoading] = useState('');
+  const [page, setPage] = useState(0);
+  const [pendingKick, setPendingKick] = useState<PlayerRow | null>(null);
+  const [pendingBan, setPendingBan] = useState<PlayerRow | null>(null);
+  const [rowActionReason, setRowActionReason] = useState('');
+  const [rowBanDuration, setRowBanDuration] = useState('24h');
+  const [profileFocus, setProfileFocus] = useState<ProfileFocus>(null);
+  const profileActionsRef = useRef<HTMLElement>(null);
+  const profileDmRef = useRef<HTMLElement>(null);
 
   useEffect(() => {
     fetchPlayers();
@@ -109,8 +121,9 @@ export default function Players() {
     }
   };
 
-  const openProfile = async (player: PlayerRow) => {
+  const openProfile = async (player: PlayerRow, focus: ProfileFocus = null) => {
     if (!player.id) return;
+    setProfileFocus(focus);
     setProfileLoading(true);
     try {
       setProfile(await apiFetch(`/moderation/players/${player.id}`));
@@ -120,10 +133,22 @@ export default function Players() {
       setDuration('24h');
     } catch {
       toast.error('Failed to load player profile');
+      setProfileFocus(null);
     } finally {
       setProfileLoading(false);
     }
   };
+
+  useEffect(() => {
+    if (profileLoading || !profile) return;
+    const target = profileFocus === 'dm' ? profileDmRef.current : profileFocus === 'actions' ? profileActionsRef.current : null;
+    if (!target) return;
+    window.setTimeout(() => {
+      target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      const focusable = target.querySelector<HTMLElement>('input, textarea, select, button');
+      focusable?.focus();
+    }, 50);
+  }, [profileLoading, profile, profileFocus]);
 
   const refreshProfile = async () => {
     if (!profile?.id) return;
@@ -131,15 +156,17 @@ export default function Players() {
     fetchPlayers();
   };
 
-  const runLegacyKick = async (player: PlayerRow) => {
+  const runLegacyKick = async (player: PlayerRow, kickReason: string) => {
     if (!player.sourceId) return;
     setActionLoading(`kick-${player.sourceId}`);
     try {
       await apiFetch(`/players/${player.sourceId}/kick`, {
         method: 'POST',
-        body: JSON.stringify({ reason: reason || 'Kicked by Portside' }),
+        body: JSON.stringify({ reason: kickReason || 'Kicked by Portside' }),
       });
       toast.success('Player kicked');
+      setPendingKick(null);
+      setRowActionReason('');
       fetchPlayers();
     } catch {
       toast.error('Failed to kick player');
@@ -148,7 +175,7 @@ export default function Players() {
     }
   };
 
-  const createBan = async (player: PlayerRow) => {
+  const createBan = async (player: PlayerRow, banReason: string, banDuration: string) => {
     if (hasActiveBan(player)) {
       toast.error('Player already has an active ban');
       return;
@@ -159,14 +186,16 @@ export default function Players() {
       if (player.id) {
         await apiFetch(`/moderation/players/${player.id}/bans`, {
           method: 'POST',
-          body: JSON.stringify({ reason: reason || 'Banned by Portside', duration }),
+          body: JSON.stringify({ reason: banReason || 'Banned by Portside', duration: banDuration }),
         });
       } else if (player.sourceId) {
         await apiFetch(`/players/${player.sourceId}/ban`, {
           method: 'POST',
-          body: JSON.stringify({ reason: reason || 'Banned by Portside', duration }),
+          body: JSON.stringify({ reason: banReason || 'Banned by Portside', duration: banDuration }),
         });
       }
+      setPendingBan(null);
+      setRowActionReason('');
       toast.success('Ban recorded');
       if (profile?.id) {
         await refreshProfile();
@@ -293,6 +322,14 @@ export default function Players() {
     ].join(' ').toLowerCase().includes(query));
   }, [players, onlineFallback, search]);
 
+  const totalPages = Math.max(1, Math.ceil(visiblePlayers.length / PAGE_SIZE));
+  const currentPage = Math.min(page, totalPages - 1);
+  const pagedPlayers = visiblePlayers.slice(currentPage * PAGE_SIZE, (currentPage + 1) * PAGE_SIZE);
+
+  useEffect(() => {
+    setPage(0);
+  }, [search, players.length, onlineFallback.length]);
+
   const profileOnline = profile ? playerIsOnline(profile) : false;
   const profileBanned = profile ? hasActiveBan(profile) : false;
 
@@ -352,7 +389,7 @@ export default function Players() {
           ) : visiblePlayers.length === 0 ? (
             <div className="p-12 text-center text-zinc-500 text-sm">No players found yet. The monitor resource will populate durable records as players connect.</div>
           ) : (
-            visiblePlayers.map(player => {
+            pagedPlayers.map(player => {
               const rowKey = player.id || `online-${player.sourceId}`;
               const rowOnline = playerIsOnline(player);
               const rowBanned = hasActiveBan(player);
@@ -415,13 +452,13 @@ export default function Players() {
                         <MenuAction label="Open Profile" icon={<FileText className="h-4 w-4" />} onClick={() => { setOpenActionMenu(''); openProfile(player); }} />
                       )}
                       {hasPermission('players.warn') && player.id && rowOnline && (
-                        <MenuAction label="Warn Player" icon={<MessageSquareWarning className="h-4 w-4" />} onClick={() => { setOpenActionMenu(''); openProfile(player); }} />
+                        <MenuAction label="Warn Player" icon={<MessageSquareWarning className="h-4 w-4" />} onClick={() => { setOpenActionMenu(''); void openProfile(player, 'actions'); }} />
                       )}
                       {hasPermission('players.direct_message') && player.id && rowOnline && (
-                        <MenuAction label="Direct Message" icon={<Send className="h-4 w-4" />} onClick={() => { setOpenActionMenu(''); openProfile(player); }} />
+                        <MenuAction label="Direct Message" icon={<Send className="h-4 w-4" />} onClick={() => { setOpenActionMenu(''); void openProfile(player, 'dm'); }} />
                       )}
                       {hasPermission('players.kick') && player.sourceId && (
-                        <MenuAction label="Kick Player" icon={actionLoading === `kick-${player.sourceId}` ? <Loader2 className="h-4 w-4 animate-spin" /> : <Zap className="h-4 w-4" />} onClick={() => { setOpenActionMenu(''); runLegacyKick(player); }} />
+                        <MenuAction label="Kick Player" icon={actionLoading === `kick-${player.sourceId}` ? <Loader2 className="h-4 w-4 animate-spin" /> : <Zap className="h-4 w-4" />} onClick={() => { setOpenActionMenu(''); setRowActionReason(''); setPendingKick(player); }} />
                       )}
                       {hasPermission('players.ban') && (
                         <MenuAction
@@ -429,7 +466,7 @@ export default function Players() {
                           disabled={rowBanned}
                           label={rowBanned ? 'Already Banned' : 'Ban Player'}
                           icon={actionLoading === 'ban' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Ban className="h-4 w-4" />}
-                          onClick={() => { setOpenActionMenu(''); createBan(player); }}
+                          onClick={() => { setOpenActionMenu(''); setRowActionReason(''); setRowBanDuration('24h'); setPendingBan(player); }}
                         />
                       )}
                     </div>
@@ -440,6 +477,37 @@ export default function Players() {
             })
           )}
         </div>
+
+        {visiblePlayers.length > PAGE_SIZE && (
+          <div className="flex items-center justify-between gap-4 border-t border-zinc-800 bg-zinc-900/50 px-6 py-3 shrink-0">
+            <span className="text-xs text-zinc-500">
+              Showing {currentPage * PAGE_SIZE + 1}–{Math.min((currentPage + 1) * PAGE_SIZE, visiblePlayers.length)} of {visiblePlayers.length}
+            </span>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                disabled={currentPage === 0}
+                onClick={() => setPage(p => Math.max(0, p - 1))}
+                className="inline-flex items-center gap-1 rounded border border-zinc-800 px-2 py-1 text-xs font-bold text-zinc-300 hover:bg-zinc-800 disabled:opacity-40"
+              >
+                <ChevronLeft className="h-3.5 w-3.5" />
+                Prev
+              </button>
+              <span className="text-xs font-mono text-zinc-500">
+                {currentPage + 1} / {totalPages}
+              </span>
+              <button
+                type="button"
+                disabled={currentPage >= totalPages - 1}
+                onClick={() => setPage(p => Math.min(totalPages - 1, p + 1))}
+                className="inline-flex items-center gap-1 rounded border border-zinc-800 px-2 py-1 text-xs font-bold text-zinc-300 hover:bg-zinc-800 disabled:opacity-40"
+              >
+                Next
+                <ChevronRight className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
       {(profile || profileLoading) && (
@@ -450,7 +518,7 @@ export default function Players() {
                 <h2 className="text-lg font-bold text-white">{profile?.displayName || 'Loading player...'}</h2>
                 <p className="mt-1 text-xs text-zinc-500 font-mono">{profile?.identifiers?.[0] || 'Loading identifiers'}</p>
               </div>
-              <button onClick={() => setProfile(null)} className="p-1 text-zinc-500 hover:text-white"><X className="h-5 w-5" /></button>
+              <button onClick={() => { setProfile(null); setProfileFocus(null); }} className="p-1 text-zinc-500 hover:text-white"><X className="h-5 w-5" /></button>
             </div>
 
             {profileLoading || !profile ? (
@@ -502,14 +570,14 @@ export default function Players() {
                 </div>
 
                 <aside className="border-t xl:border-t-0 xl:border-l border-zinc-800 p-5 space-y-5 bg-zinc-950/40">
-                  <Section title="Actions" icon={<Ban className="h-4 w-4" />}>
+                  <Section ref={profileActionsRef} title="Actions" icon={<Ban className="h-4 w-4" />}>
                     <div className="space-y-3">
                       <input value={reason} onChange={event => setReason(event.target.value)} placeholder="Reason" className="w-full rounded-lg border border-zinc-800 bg-black/40 px-3 py-2 text-sm text-white placeholder-zinc-600 focus:outline-none focus:border-orange-500" />
                       <select value={duration} onChange={event => setDuration(event.target.value)} className="w-full rounded-lg border border-zinc-800 bg-black/40 px-3 py-2 text-sm text-white focus:outline-none focus:border-orange-500">
                         {defaultDurations.map(item => <option key={item} value={item}>{item}</option>)}
                       </select>
                       <div className="grid grid-cols-2 gap-2">
-                        {hasPermission('players.ban') && <ActionButton onClick={() => createBan(profile)} loading={actionLoading === 'ban'} disabled={profileBanned} label={profileBanned ? 'Banned' : 'Ban'} icon={<Ban className="h-4 w-4" />} />}
+                        {hasPermission('players.ban') && <ActionButton onClick={() => createBan(profile, reason, duration)} loading={actionLoading === 'ban'} disabled={profileBanned} label={profileBanned ? 'Banned' : 'Ban'} icon={<Ban className="h-4 w-4" />} />}
                         {hasPermission('players.warn') && profileOnline && <ActionButton onClick={createWarning} loading={actionLoading === 'warn'} label="Warn" icon={<MessageSquareWarning className="h-4 w-4" />} />}
                       </div>
                     </div>
@@ -537,7 +605,7 @@ export default function Players() {
                   </Section>
 
                   {hasPermission('players.direct_message') && profileOnline && (
-                    <Section title="Direct Message" icon={<Send className="h-4 w-4" />}>
+                    <Section ref={profileDmRef} title="Direct Message" icon={<Send className="h-4 w-4" />}>
                       <div className="space-y-2">
                         <textarea value={directMessage} onChange={event => setDirectMessage(event.target.value)} placeholder="Message player..." className="min-h-20 w-full rounded-lg border border-zinc-800 bg-black/40 px-3 py-2 text-sm text-white placeholder-zinc-600 focus:outline-none focus:border-orange-500" />
                         <button onClick={sendDirectMessage} disabled={!directMessage.trim() || actionLoading === 'dm'} className="inline-flex items-center gap-2 rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm font-bold text-white hover:border-zinc-700 disabled:opacity-50">
@@ -553,6 +621,53 @@ export default function Players() {
           </div>
         </div>
       )}
+
+      <ConfirmModal
+        open={Boolean(pendingKick)}
+        title="Kick player?"
+        description={pendingKick ? `Remove ${pendingKick.displayName || pendingKick.name} from the server now.` : ''}
+        confirmLabel="Kick Player"
+        danger
+        loading={Boolean(pendingKick?.sourceId && actionLoading === `kick-${pendingKick.sourceId}`)}
+        confirmDisabled={!rowActionReason.trim()}
+        onConfirm={() => pendingKick && runLegacyKick(pendingKick, rowActionReason.trim())}
+        onCancel={() => { setPendingKick(null); setRowActionReason(''); }}
+      >
+        <input
+          value={rowActionReason}
+          onChange={event => setRowActionReason(event.target.value)}
+          placeholder="Kick reason (required)"
+          className="w-full rounded-lg border border-zinc-800 bg-black/40 px-3 py-2 text-sm text-white placeholder-zinc-600 focus:outline-none focus:border-red-500"
+        />
+      </ConfirmModal>
+
+      <ConfirmModal
+        open={Boolean(pendingBan)}
+        title="Ban player?"
+        description={pendingBan ? `Record a ban for ${pendingBan.displayName || pendingBan.name}. They will be blocked on next join when ban enforcement is active.` : ''}
+        confirmLabel="Ban Player"
+        danger
+        loading={actionLoading === 'ban'}
+        confirmDisabled={!rowActionReason.trim()}
+        onConfirm={() => pendingBan && createBan(pendingBan, rowActionReason.trim(), rowBanDuration)}
+        onCancel={() => { setPendingBan(null); setRowActionReason(''); }}
+      >
+        <div className="space-y-3">
+          <input
+            value={rowActionReason}
+            onChange={event => setRowActionReason(event.target.value)}
+            placeholder="Ban reason (required)"
+            className="w-full rounded-lg border border-zinc-800 bg-black/40 px-3 py-2 text-sm text-white placeholder-zinc-600 focus:outline-none focus:border-red-500"
+          />
+          <select
+            value={rowBanDuration}
+            onChange={event => setRowBanDuration(event.target.value)}
+            className="w-full rounded-lg border border-zinc-800 bg-black/40 px-3 py-2 text-sm text-white focus:outline-none focus:border-red-500"
+          >
+            {defaultDurations.map(item => <option key={item} value={item}>{item}</option>)}
+          </select>
+        </div>
+      </ConfirmModal>
 
       {kickAllOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm">
@@ -610,9 +725,9 @@ function MenuAction({ label, icon, onClick, danger = false, disabled = false }: 
   );
 }
 
-function Section({ title, icon, children }: { title: string; icon: React.ReactNode; children: React.ReactNode }) {
+function Section({ title, icon, children, ref }: { title: string; icon: React.ReactNode; children: React.ReactNode; ref?: React.Ref<HTMLElement> }) {
   return (
-    <section>
+    <section ref={ref}>
       <h3 className="mb-3 flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest text-zinc-500">
         <span className="text-orange-500">{icon}</span>
         {title}

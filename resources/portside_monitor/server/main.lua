@@ -1,4 +1,4 @@
-local VERSION = '0.1.10'
+local VERSION = '0.1.13'
 local RESOURCE_NAME = GetCurrentResourceName()
 local debugMode = false
 local decodePayload
