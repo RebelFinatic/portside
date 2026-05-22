@@ -51,3 +51,31 @@ select option {
   background-color: #18181b;
   color: #d4d4d8;
 }
+
+@keyframes modal-overlay-enter {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes modal-panel-enter {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.modal-overlay-enter {
+  animation: modal-overlay-enter 0.2s ease-out;
+}
+
+.modal-panel-enter {
+  animation: modal-panel-enter 0.25s ease-out;
+}
