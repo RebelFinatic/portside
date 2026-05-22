@@ -353,42 +353,46 @@ export default function Players() {
   const profileBanned = profile ? hasActiveBan(profile) : false;
 
   return (
-    <div className="flex-1 flex flex-col w-full h-full p-6 lg:p-8">
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-6 gap-4">
+    <div className="flex h-full w-full flex-1 flex-col p-4 sm:p-6 lg:p-8">
+      <div className="flex flex-col gap-4 pb-6 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight text-white m-0">Players</h1>
-          <p className="text-sm text-zinc-500 m-0">Search known players, review history, and record moderation actions.</p>
+          <h1 className="m-0 text-2xl font-bold tracking-tight text-white">Players</h1>
+          <p className="m-0 text-sm text-zinc-500">Search known players, review history, and record moderation actions.</p>
         </div>
 
-        <div className="flex gap-2">
-          {hasPermission('players.kick') && (
-            <button
-              onClick={() => setKickAllOpen(true)}
-              className="inline-flex items-center gap-2 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm font-semibold text-red-300 hover:bg-red-500/20"
-            >
-              <Users className="h-4 w-4" />
-              Kick All
-            </button>
-          )}
-          <div className="relative">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-zinc-500" />
+        <div className="flex w-full flex-col gap-3 sm:w-auto sm:flex-row sm:items-center">
+          <div className="relative w-full sm:w-72">
+            <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-500" />
             <input
               type="text"
               placeholder="Search name, ID, identifier..."
               value={search}
               onChange={(event) => setSearch(event.target.value)}
               onKeyDown={(event) => event.key === 'Enter' && fetchPlayers()}
-              className="pl-9 pr-4 py-2 w-full sm:w-72 bg-zinc-900 border border-zinc-800 rounded-lg text-sm text-white placeholder-zinc-500 focus:outline-none focus:ring-1 focus:ring-orange-500 focus:border-orange-500 transition-colors"
+              className="w-full rounded-lg border border-zinc-800 bg-zinc-900 py-2 pl-9 pr-4 text-sm text-white placeholder-zinc-500 transition-colors focus:border-orange-500 focus:outline-none focus:ring-1 focus:ring-orange-500"
             />
           </div>
-          <button
-            onClick={fetchPlayers}
-            disabled={loading}
-            className="inline-flex items-center gap-2 rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm font-semibold text-white hover:border-zinc-700 disabled:opacity-60"
-          >
-            {loading ? <Loader2 className="h-4 w-4 animate-spin text-orange-500" /> : <RefreshCw className="h-4 w-4 text-zinc-400" />}
-            Refresh
-          </button>
+          <div className="flex gap-2">
+            {hasPermission('players.kick') && (
+              <button
+                type="button"
+                onClick={() => setKickAllOpen(true)}
+                className="inline-flex flex-1 items-center justify-center gap-2 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm font-semibold text-red-300 hover:bg-red-500/20 sm:flex-none"
+              >
+                <Users className="h-4 w-4" />
+                Kick All
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={fetchPlayers}
+              disabled={loading}
+              className="inline-flex flex-1 items-center justify-center gap-2 rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm font-semibold text-white hover:border-zinc-700 disabled:opacity-60 sm:flex-none"
+            >
+              {loading ? <Loader2 className="h-4 w-4 animate-spin text-orange-500" /> : <RefreshCw className="h-4 w-4 text-zinc-400" />}
+              Refresh
+            </button>
+          </div>
         </div>
       </div>
 
@@ -432,24 +436,45 @@ export default function Players() {
                   event.preventDefault();
                   openProfile(player);
                 }}
-                className={`grid grid-cols-1 lg:grid-cols-[90px_1.2fr_1.4fr_120px_160px_210px] gap-3 lg:gap-4 items-center px-6 py-4 border-b border-zinc-800/70 hover:bg-zinc-800/40 focus:outline-none focus:bg-zinc-800/50 ${player.id ? 'cursor-pointer' : ''}`}
+                className={`grid grid-cols-1 gap-3 border-b border-zinc-800/70 px-4 py-4 hover:bg-zinc-800/40 focus:bg-zinc-800/50 focus:outline-none lg:grid-cols-[90px_1.2fr_1.4fr_120px_160px_210px] lg:items-center lg:gap-4 lg:px-6 ${player.id ? 'cursor-pointer' : ''}`}
               >
-                <div className="font-mono text-xs text-zinc-500">{player.sourceId ? `#${player.sourceId}` : 'offline'}</div>
-                <div className="min-w-0 text-left">
+                <div className="flex items-center justify-between lg:block lg:order-none order-2">
+                  <MobileLabel>ID</MobileLabel>
+                  <span className="font-mono text-xs text-zinc-500">{player.sourceId ? `#${player.sourceId}` : 'offline'}</span>
+                </div>
+
+                <div className="min-w-0 order-1 lg:order-none">
                   <div className="flex items-center gap-2">
                     <span className="truncate text-sm font-semibold text-white">{player.displayName || player.name}</span>
-                    {(player.actionCounts?.activeBans || 0) > 0 && <ShieldAlert className="w-3.5 h-3.5 text-red-400" />}
+                    {(player.actionCounts?.activeBans || 0) > 0 && <ShieldAlert className="h-3.5 w-3.5 shrink-0 text-red-400" />}
                   </div>
-                  <div className="text-[10px] uppercase tracking-wider text-zinc-600">{player.id ? 'known player' : 'online only'}</div>
+                  <div className="text-[10px] uppercase tracking-wider text-zinc-600">
+                    {player.id ? 'known player' : 'online only'}
+                  </div>
                 </div>
-                <div className="font-mono text-[11px] text-zinc-500 truncate">{player.identifiers?.[0] || 'no identifier captured'}</div>
-                <StatusBadge online={rowOnline} ping={player.ping} />
-                <div className="flex gap-2 text-[10px] font-bold uppercase tracking-wider text-zinc-500">
-                  <span>{player.actionCounts?.activeBans || 0} bans</span>
-                  <span>{player.actionCounts?.warnings || 0} warns</span>
-                  <span>{player.actionCounts?.kicks || 0} kicks</span>
+
+                <div className="flex min-w-0 items-center justify-between gap-3 order-3 lg:order-none lg:block">
+                  <MobileLabel>Identifiers</MobileLabel>
+                  <span className="truncate font-mono text-[11px] text-zinc-500 lg:max-w-none">
+                    {player.identifiers?.[0] || 'no identifier captured'}
+                  </span>
                 </div>
-                <div className="relative flex justify-end">
+
+                <div className="flex items-center justify-between order-4 lg:order-none lg:block">
+                  <MobileLabel>Status</MobileLabel>
+                  <StatusBadge online={rowOnline} ping={player.ping} />
+                </div>
+
+                <div className="flex items-center justify-between order-5 lg:order-none lg:block">
+                  <MobileLabel>History</MobileLabel>
+                  <div className="flex gap-2 text-[10px] font-bold uppercase tracking-wider text-zinc-500">
+                    <span>{player.actionCounts?.activeBans || 0} bans</span>
+                    <span>{player.actionCounts?.warnings || 0} warns</span>
+                    <span>{player.actionCounts?.kicks || 0} kicks</span>
+                  </div>
+                </div>
+
+                <div className="relative order-6 flex justify-end lg:order-none">
                   <button
                     type="button"
                     title="Player actions"
@@ -466,7 +491,10 @@ export default function Players() {
                   </button>
 
                   {openActionMenu === rowKey && (
-                    <div onClick={(event) => event.stopPropagation()} className="absolute right-0 top-8 z-20 w-48 overflow-hidden rounded-lg border border-zinc-800 bg-zinc-950 py-1 shadow-xl">
+                    <div
+                      onClick={(event) => event.stopPropagation()}
+                      className="absolute right-0 top-full z-20 mt-1 w-48 overflow-hidden rounded-lg border border-zinc-800 bg-zinc-950 py-1 shadow-xl lg:top-8 lg:mt-0"
+                    >
                       {player.id && (
                         <MenuAction label="Open Profile" icon={<FileText className="h-4 w-4" />} onClick={() => { setOpenActionMenu(''); openProfile(player); }} />
                       )}
@@ -498,7 +526,7 @@ export default function Players() {
         </div>
 
         {visiblePlayers.length > PAGE_SIZE && (
-          <div className="flex items-center justify-between gap-4 border-t border-zinc-800 bg-zinc-900/50 px-6 py-3 shrink-0">
+          <div className="flex shrink-0 flex-col gap-3 border-t border-zinc-800 bg-zinc-900/50 px-4 py-3 sm:flex-row sm:items-center sm:justify-between sm:gap-4 sm:px-6">
             <span className="text-xs text-zinc-500">
               Showing {currentPage * PAGE_SIZE + 1}–{Math.min((currentPage + 1) * PAGE_SIZE, visiblePlayers.length)} of {visiblePlayers.length}
             </span>
@@ -635,7 +663,11 @@ export default function Players() {
 }
 
 function TableHead({ children, align = 'text-left' }: { children: React.ReactNode; align?: string }) {
-  return <div className={`text-[10px] uppercase font-bold tracking-widest text-zinc-400 ${align}`}>{children}</div>;
+  return <div className={`text-[10px] font-bold uppercase tracking-widest text-zinc-400 ${align}`}>{children}</div>;
+}
+
+function MobileLabel({ children }: { children: React.ReactNode }) {
+  return <span className="text-[10px] font-bold uppercase tracking-widest text-zinc-600 lg:hidden">{children}</span>;
 }
 
 function StatusBadge({ online, ping }: { online: boolean; ping?: number | null }) {

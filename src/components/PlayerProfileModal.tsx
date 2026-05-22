@@ -1,8 +1,8 @@
 import React, { useEffect, useId, useRef, useState } from 'react';
 import {
   Ban,
-  ChevronDown,
-  ChevronUp,
+  Check,
+  Copy,
   History,
   LayoutDashboard,
   Loader2,
@@ -16,6 +16,8 @@ import {
   X,
 } from 'lucide-react';
 import { formatDistanceStrict, intervalToDuration } from 'date-fns';
+import { AnimatePresence, motion } from 'motion/react';
+import { toast } from 'sonner';
 import { Select, SelectOption } from './Select';
 import { hasPermission } from '../lib/api';
 
@@ -73,7 +75,45 @@ const PROFILE_TABS: { id: ProfileTab; label: string; icon: React.ReactNode }[] =
 const defaultDurations = ['1h', '24h', '3d', '1w', 'permanent'];
 
 const MODAL_SHELL_CLASS =
-  'modal-panel-enter flex h-[min(680px,88vh)] w-full max-w-5xl flex-col overflow-hidden rounded-xl border border-zinc-800 bg-[#101010] shadow-2xl';
+  'modal-panel-enter flex h-full w-full max-w-full flex-col overflow-hidden rounded-none border border-zinc-800 bg-[#101010] shadow-2xl sm:h-[min(680px,88vh)] sm:max-w-5xl sm:rounded-xl';
+
+const IDENTIFIER_LABELS: Record<string, string> = {
+  license: 'License',
+  license2: 'License 2',
+  discord: 'Discord',
+  steam: 'Steam',
+  fivem: 'FiveM',
+  xbl: 'Xbox Live',
+  live: 'Live',
+  ip: 'IP',
+  hwid: 'HWID',
+};
+
+type ParsedIdentifier = { label: string; value: string; raw: string };
+
+function humanizeIdentifierPrefix(prefix: string) {
+  const key = prefix.toLowerCase();
+  if (IDENTIFIER_LABELS[key]) return IDENTIFIER_LABELS[key];
+  return key.charAt(0).toUpperCase() + key.slice(1);
+}
+
+function parseIdentifier(raw: string): ParsedIdentifier {
+  const colonIndex = raw.indexOf(':');
+  if (colonIndex === -1) {
+    return { label: 'Identifier', value: raw, raw };
+  }
+  const prefix = raw.slice(0, colonIndex);
+  const value = raw.slice(colonIndex + 1);
+  return { label: humanizeIdentifierPrefix(prefix), value, raw };
+}
+
+function collectProfileIdentifiers(profile: PlayerProfile): ParsedIdentifier[] {
+  const rawItems = [
+    ...profile.identifiers,
+    ...(profile.hwids || []).map(value => `hwid:${value}`),
+  ];
+  return rawItems.map(parseIdentifier);
+}
 
 const formatSessionDuration = (joinedAt: string, leftAt?: string | null) => {
   const start = new Date(joinedAt);
@@ -181,7 +221,7 @@ export default function PlayerProfileModal({
 
   return (
     <div
-      className="modal-overlay-enter fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm"
+      className="modal-overlay-enter fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-0 backdrop-blur-sm sm:p-4"
       onClick={handleBackdropClick}
     >
       <div
@@ -221,41 +261,50 @@ export default function PlayerProfileModal({
 
             <ProfileTabBar activeTab={activeTab} onTabChange={onTabChange} />
 
-            <div
-              ref={tabContentRef}
-              className="min-h-0 flex-1 overflow-y-auto px-6 py-5"
-            >
-              {activeTab === 'overview' && <OverviewTab profile={profile} />}
-              {activeTab === 'history' && (
-                <HistoryTab
-                  profile={profile}
-                  actionLoading={actionLoading}
-                  onRevokeAction={onRevokeAction}
-                />
-              )}
-              {activeTab === 'sessions' && <SessionsTab profile={profile} />}
-              {activeTab === 'staff' && (
-                <StaffTab
-                  profile={profile}
-                  profileOnline={profileOnline}
-                  profileBanned={profileBanned}
-                  reason={reason}
-                  onReasonChange={onReasonChange}
-                  duration={duration}
-                  onDurationChange={onDurationChange}
-                  note={note}
-                  onNoteChange={onNoteChange}
-                  directMessage={directMessage}
-                  onDirectMessageChange={onDirectMessageChange}
-                  actionLoading={actionLoading}
-                  onBan={onBan}
-                  onWarn={onWarn}
-                  onAddNote={onAddNote}
-                  onSendDm={onSendDm}
-                  profileActionsRef={profileActionsRef}
-                  profileDmRef={profileDmRef}
-                />
-              )}
+            <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
+              <div
+                ref={tabContentRef}
+                className="min-h-0 flex-1 overflow-y-auto px-4 py-4 sm:px-6 sm:py-5"
+              >
+                {activeTab === 'overview' && <OverviewTab profile={profile} />}
+                {activeTab === 'history' && (
+                  <HistoryTab
+                    profile={profile}
+                    actionLoading={actionLoading}
+                    onRevokeAction={onRevokeAction}
+                  />
+                )}
+                {activeTab === 'sessions' && <SessionsTab profile={profile} />}
+                {activeTab === 'staff' && (
+                  <StaffTab
+                    profile={profile}
+                    profileOnline={profileOnline}
+                    profileBanned={profileBanned}
+                    reason={reason}
+                    onReasonChange={onReasonChange}
+                    duration={duration}
+                    onDurationChange={onDurationChange}
+                    note={note}
+                    onNoteChange={onNoteChange}
+                    directMessage={directMessage}
+                    onDirectMessageChange={onDirectMessageChange}
+                    actionLoading={actionLoading}
+                    onBan={onBan}
+                    onWarn={onWarn}
+                    onAddNote={onAddNote}
+                    onSendDm={onSendDm}
+                    profileActionsRef={profileActionsRef}
+                    profileDmRef={profileDmRef}
+                  />
+                )}
+              </div>
+
+              <div
+                className="shrink-0 border-t border-zinc-800 lg:flex lg:max-h-none lg:w-80 lg:flex-col lg:border-t-0 lg:border-l"
+                aria-label="Player identifiers"
+              >
+                <IdentifierPanel profile={profile} />
+              </div>
             </div>
           </>
         )}
@@ -275,16 +324,12 @@ function ProfileHero({
   profileOnline: boolean;
   onClose: () => void;
 }) {
-  const allIdentifiers = [
-    ...profile.identifiers,
-    ...(profile.hwids || []).map(value => `hwid:${value}`),
-  ];
   const activeBans = profile.actionCounts?.activeBans ?? 0;
   const warnings = profile.actionCounts?.warnings ?? 0;
   const kicks = profile.actionCounts?.kicks ?? 0;
 
   return (
-    <div className="shrink-0 border-b border-zinc-800 bg-zinc-950/50 px-6 py-4">
+    <div className="shrink-0 border-b border-zinc-800 bg-zinc-950/50 px-4 py-3 sm:px-6 sm:py-4">
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0 flex-1 space-y-2">
           <div className="flex flex-wrap items-center gap-2">
@@ -298,12 +343,6 @@ function ProfileHero({
               </span>
             )}
           </div>
-
-          {allIdentifiers[0] && (
-            <p className="truncate font-mono text-xs text-zinc-500" title={allIdentifiers[0]}>
-              {allIdentifiers[0]}
-            </p>
-          )}
 
           <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-zinc-500">
             <span>
@@ -346,8 +385,12 @@ function ProfileTabBar({
   onTabChange: (tab: ProfileTab) => void;
 }) {
   return (
-    <div className="shrink-0 border-b border-zinc-800 px-6">
-      <div className="flex flex-wrap gap-2 py-3" role="tablist" aria-label="Player profile sections">
+    <div className="shrink-0 border-b border-zinc-800 px-4 sm:px-6">
+      <div
+        className="-mx-1 flex gap-2 overflow-x-auto px-1 py-3"
+        role="tablist"
+        aria-label="Player profile sections"
+      >
         {PROFILE_TABS.map(tab => (
           <button
             key={tab.id}
@@ -355,7 +398,7 @@ function ProfileTabBar({
             role="tab"
             aria-selected={activeTab === tab.id}
             onClick={() => onTabChange(tab.id)}
-            className={`inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-sm font-semibold transition-colors ${
+            className={`inline-flex shrink-0 items-center gap-2 rounded-lg border px-3 py-2 text-sm font-semibold transition-colors ${
               activeTab === tab.id
                 ? 'border-orange-600/40 bg-orange-600/10 text-orange-300'
                 : 'border-zinc-800 bg-zinc-950 text-zinc-400 hover:border-zinc-700 hover:text-white'
@@ -376,15 +419,6 @@ function OverviewTab({ profile }: { profile: PlayerProfile }) {
 
   return (
     <div className="space-y-5">
-      <Section title="Identifiers" icon={<ShieldAlert className="h-4 w-4" />}>
-        <CollapsibleIdentifierList
-          items={[
-            ...profile.identifiers,
-            ...(profile.hwids || []).map(value => `hwid:${value}`),
-          ]}
-        />
-      </Section>
-
       {recentNames.length > 0 && (
         <Section title="Recent names" icon={<UserRound className="h-4 w-4" />}>
           <div className="flex flex-wrap gap-2">
@@ -701,54 +735,96 @@ function StaffTab({
   );
 }
 
-function CollapsibleIdentifierList({ items }: { items: string[] }) {
-  const [expanded, setExpanded] = useState(false);
-
-  if (!items.length) {
-    return <EmptyText>No identifiers captured yet.</EmptyText>;
-  }
-
-  const primary = items[0];
-  const rest = items.slice(1);
+function IdentifierPanel({ profile }: { profile: PlayerProfile }) {
+  const identifiers = collectProfileIdentifiers(profile);
 
   return (
-    <div className="space-y-3">
-      <div className="rounded-lg border border-zinc-800 bg-black/20 px-3 py-2.5 font-mono text-sm text-zinc-400 break-all">
-        {primary}
+    <div className="flex max-h-[40vh] min-h-0 flex-col bg-zinc-950/30 lg:max-h-none lg:h-full">
+      <div className="flex shrink-0 items-center justify-between gap-2 border-b border-zinc-800/80 px-4 py-3">
+        <div className="flex items-center gap-2">
+          <ShieldAlert className="h-4 w-4 text-orange-500" />
+          <h3 className="text-sm font-semibold text-white">Identifiers</h3>
+        </div>
+        <span className="rounded border border-zinc-800 bg-zinc-900 px-2 py-0.5 text-xs font-semibold text-zinc-400">
+          {identifiers.length}
+        </span>
       </div>
-      {rest.length > 0 && (
-        <>
-          {expanded && (
-            <div className="space-y-2">
-              {rest.map(item => (
-                <div
-                  key={item}
-                  className="rounded-lg border border-zinc-800 bg-black/20 px-3 py-2.5 font-mono text-sm text-zinc-400 break-all"
-                >
-                  {item}
-                </div>
-              ))}
-            </div>
+      <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3 sm:px-4">
+        {identifiers.length === 0 ? (
+          <p className="px-1 py-4 text-center text-sm text-zinc-600">No identifiers captured yet.</p>
+        ) : (
+          <div className="space-y-2">
+            {identifiers.map(item => (
+              <CopyIdentifierRow key={item.raw} identifier={item} />
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function CopyIdentifierRow({ identifier }: { identifier: ParsedIdentifier }) {
+  const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    if (!copied) return;
+    const timer = window.setTimeout(() => setCopied(false), 1500);
+    return () => window.clearTimeout(timer);
+  }, [copied]);
+
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(identifier.raw);
+      setCopied(true);
+    } catch {
+      toast.error('Failed to copy identifier');
+    }
+  };
+
+  return (
+    <div className="group flex items-start gap-2 rounded-lg border border-zinc-800 bg-black/20 px-3 py-2.5 transition-colors hover:border-zinc-700">
+      <div className="min-w-0 flex-1">
+        <div className="text-[10px] font-bold uppercase tracking-wider text-zinc-500">{identifier.label}</div>
+        <p className="mt-0.5 break-all font-mono text-xs text-zinc-300">{identifier.value}</p>
+      </div>
+      <motion.button
+        type="button"
+        onClick={() => void handleCopy()}
+        whileTap={{ scale: 0.92 }}
+        aria-label={copied ? 'Copied' : 'Copy identifier'}
+        className={`relative flex h-8 w-8 shrink-0 items-center justify-center rounded-md border transition-colors ${
+          copied
+            ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-400'
+            : 'border-zinc-800 bg-zinc-900 text-zinc-500 hover:border-zinc-700 hover:text-white'
+        }`}
+      >
+        <AnimatePresence mode="wait" initial={false}>
+          {copied ? (
+            <motion.span
+              key="check"
+              initial={{ opacity: 0, scale: 0.6 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.6 }}
+              transition={{ duration: 0.15 }}
+              className="inline-flex"
+            >
+              <Check className="h-3.5 w-3.5" />
+            </motion.span>
+          ) : (
+            <motion.span
+              key="copy"
+              initial={{ opacity: 0, scale: 0.6 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.6 }}
+              transition={{ duration: 0.15 }}
+              className="inline-flex"
+            >
+              <Copy className="h-3.5 w-3.5" />
+            </motion.span>
           )}
-          <button
-            type="button"
-            onClick={() => setExpanded(value => !value)}
-            className="inline-flex items-center gap-2 text-sm font-semibold text-orange-400 transition-colors hover:text-orange-300"
-          >
-            {expanded ? (
-              <>
-                <ChevronUp className="h-4 w-4" />
-                Hide {rest.length} more identifier{rest.length === 1 ? '' : 's'}
-              </>
-            ) : (
-              <>
-                <ChevronDown className="h-4 w-4" />
-                Show all identifiers ({items.length})
-              </>
-            )}
-          </button>
-        </>
-      )}
+        </AnimatePresence>
+      </motion.button>
     </div>
   );
 }
