@@ -9,6 +9,7 @@ import Login from './pages/Login';
 import Setup from './pages/Setup';
 import Dashboard from './pages/Dashboard';
 import Players from './pages/Players';
+import Bans from './pages/Bans';
 import Console from './pages/Console';
 import Resources from './pages/Resources';
 import Database from './pages/Database';
@@ -112,6 +113,7 @@ export default function App() {
             <Route path="/" element={<ProtectedRoute onboardingRequired={onboardingRequired} onboardingChecked={onboardingChecked}><Layout /></ProtectedRoute>}>
               <Route index element={<Dashboard />} />
               <Route path="players" element={<Players />} />
+              <Route path="bans" element={<Bans />} />
               <Route path="console" element={<Console />} />
               <Route path="resources" element={<Resources />} />
               <Route path="database" element={<Database />} />

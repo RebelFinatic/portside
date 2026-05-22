@@ -1,11 +1,14 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Ban, ChevronLeft, ChevronRight, FileText, History, Loader2, MessageSquareWarning, MoreHorizontal, Plus, RefreshCw, Search, Send, ShieldAlert, StickyNote, Users, X, Zap } from 'lucide-react';
+import { formatDistanceStrict, intervalToDuration } from 'date-fns';
+import { useSearchParams } from 'react-router-dom';
 import { apiFetch, hasPermission } from '../lib/api';
 import { toast } from 'sonner';
 import ConfirmModal from '../components/ConfirmModal';
 
 const PAGE_SIZE = 50;
 type ProfileFocus = 'actions' | 'dm' | null;
+type ProfileTab = 'history' | 'sessions';
 
 interface PlayerRow {
   id?: string;
@@ -36,6 +39,21 @@ const defaultDurations = ['1h', '24h', '3d', '1w', 'permanent'];
 
 const playerIsOnline = (player: Pick<PlayerRow, 'online' | 'sourceId'>) => Boolean(player.online || player.sourceId);
 
+const formatSessionDuration = (joinedAt: string, leftAt?: string | null) => {
+  const start = new Date(joinedAt);
+  const end = leftAt ? new Date(leftAt) : new Date();
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || end.getTime() <= start.getTime()) {
+    return leftAt ? '0m' : 'Active';
+  }
+  const duration = intervalToDuration({ start, end });
+  const parts = [
+    duration.hours ? `${duration.hours}h` : null,
+    duration.minutes ? `${duration.minutes}m` : null,
+    !duration.hours && duration.seconds ? `${duration.seconds}s` : null,
+  ].filter(Boolean);
+  return parts.length > 0 ? parts.join(' ') : '0m';
+};
+
 const hasActiveBan = (player: Pick<PlayerRow, 'actionCounts'> & { actions?: any[] }) => {
   if ((player.actionCounts?.activeBans || 0) > 0) return true;
   return Boolean(player.actions?.some(action => (
@@ -46,6 +64,7 @@ const hasActiveBan = (player: Pick<PlayerRow, 'actionCounts'> & { actions?: any[
 };
 
 export default function Players() {
+  const [searchParams, setSearchParams] = useSearchParams();
   const [players, setPlayers] = useState<PlayerRow[]>([]);
   const [onlineFallback, setOnlineFallback] = useState<PlayerRow[]>([]);
   const [profile, setProfile] = useState<PlayerProfile | null>(null);
@@ -67,6 +86,7 @@ export default function Players() {
   const [rowActionReason, setRowActionReason] = useState('');
   const [rowBanDuration, setRowBanDuration] = useState('24h');
   const [profileFocus, setProfileFocus] = useState<ProfileFocus>(null);
+  const [profileTab, setProfileTab] = useState<ProfileTab>('history');
   const profileActionsRef = useRef<HTMLElement>(null);
   const profileDmRef = useRef<HTMLElement>(null);
 
@@ -124,6 +144,7 @@ export default function Players() {
   const openProfile = async (player: PlayerRow, focus: ProfileFocus = null) => {
     if (!player.id) return;
     setProfileFocus(focus);
+    setProfileTab('history');
     setProfileLoading(true);
     try {
       setProfile(await apiFetch(`/moderation/players/${player.id}`));
@@ -149,6 +170,28 @@ export default function Players() {
       focusable?.focus();
     }, 50);
   }, [profileLoading, profile, profileFocus]);
+
+  useEffect(() => {
+    const profileId = searchParams.get('profile');
+    if (!profileId || loading) return;
+    const existing = players.find(player => player.id === profileId);
+    if (existing) {
+      void openProfile(existing);
+      setSearchParams({}, { replace: true });
+      return;
+    }
+    void apiFetch(`/moderation/players/${profileId}`)
+      .then(nextProfile => {
+        setProfile(nextProfile);
+        setProfileTab('history');
+        setProfileLoading(false);
+        setSearchParams({}, { replace: true });
+      })
+      .catch(() => {
+        toast.error('Failed to load player profile');
+        setSearchParams({}, { replace: true });
+      });
+  }, [loading, players, searchParams, setSearchParams]);
 
   const refreshProfile = async () => {
     if (!profile?.id) return;
@@ -530,42 +573,80 @@ export default function Players() {
                     <CodeList items={[...profile.identifiers, ...(profile.hwids || []).map(value => `hwid:${value}`)]} />
                   </Section>
 
-                  <Section title="Moderation History" icon={<History className="h-4 w-4" />}>
-                    <div className="space-y-2">
-                      {profile.actions.length === 0 ? <EmptyText>No moderation history.</EmptyText> : profile.actions.map(action => (
-                        <div key={action.id} className="rounded-lg border border-zinc-800 bg-black/20 p-3">
-                          <div className="flex items-center justify-between gap-3">
-                            <div>
-                              <span className="text-xs font-bold uppercase tracking-wider text-orange-400">{action.type}</span>
-                              <p className="mt-1 text-sm text-zinc-300">{action.reason || 'No reason provided'}</p>
-                            </div>
-                            {action.type === 'ban' && !action.revokedAt && hasPermission('players.ban') && (
-                              <button onClick={() => revokeAction(action.id)} className="rounded border border-zinc-700 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-zinc-300 hover:text-white">
-                                Revoke
-                              </button>
-                            )}
-                          </div>
-                          <div className="mt-2 text-[10px] text-zinc-600">
-                            {action.authorUsername || 'system'} · {new Date(action.createdAt).toLocaleString()}
-                            {action.expiresAt ? ` · expires ${new Date(action.expiresAt).toLocaleString()}` : ''}
-                            {action.revokedAt ? ` · revoked ${new Date(action.revokedAt).toLocaleString()}` : ''}
-                            {action.type === 'warn' ? action.acknowledgedAt ? ` - acknowledged ${new Date(action.acknowledgedAt).toLocaleString()}` : ' - awaiting acknowledgment' : ''}
-                          </div>
-                        </div>
-                      ))}
+                  <Section title="Player Record" icon={<History className="h-4 w-4" />}>
+                    <div className="mb-4 flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setProfileTab('history')}
+                        className={`rounded border px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider ${
+                          profileTab === 'history'
+                            ? 'border-orange-600/40 bg-orange-600/10 text-orange-300'
+                            : 'border-zinc-800 bg-zinc-950 text-zinc-500'
+                        }`}
+                      >
+                        Moderation History
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setProfileTab('sessions')}
+                        className={`rounded border px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider ${
+                          profileTab === 'sessions'
+                            ? 'border-orange-600/40 bg-orange-600/10 text-orange-300'
+                            : 'border-zinc-800 bg-zinc-950 text-zinc-500'
+                        }`}
+                      >
+                        Sessions
+                      </button>
                     </div>
-                  </Section>
 
-                  <Section title="Sessions" icon={<History className="h-4 w-4" />}>
-                    <div className="space-y-2">
-                      {profile.sessions.length === 0 ? <EmptyText>No sessions recorded.</EmptyText> : profile.sessions.map(session => (
-                        <div key={session.id} className="rounded border border-zinc-800 bg-black/20 px-3 py-2 text-xs text-zinc-400">
-                          #{session.sourceId || 'offline'} · {new Date(session.joinedAt).toLocaleString()}
-                          {session.leftAt ? ` to ${new Date(session.leftAt).toLocaleString()}` : ' · active'}
-                          {session.dropReason ? ` · ${session.dropReason}` : ''}
-                        </div>
-                      ))}
-                    </div>
+                    {profileTab === 'history' ? (
+                      <div className="space-y-2">
+                        {profile.actions.length === 0 ? <EmptyText>No moderation history.</EmptyText> : profile.actions.map(action => (
+                          <div key={action.id} className="rounded-lg border border-zinc-800 bg-black/20 p-3">
+                            <div className="flex items-center justify-between gap-3">
+                              <div>
+                                <span className="text-xs font-bold uppercase tracking-wider text-orange-400">{action.type}</span>
+                                <p className="mt-1 text-sm text-zinc-300">{action.reason || 'No reason provided'}</p>
+                              </div>
+                              {action.type === 'ban' && !action.revokedAt && hasPermission('players.ban') && (
+                                <button onClick={() => revokeAction(action.id)} className="rounded border border-zinc-700 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-zinc-300 hover:text-white">
+                                  Revoke
+                                </button>
+                              )}
+                            </div>
+                            <div className="mt-2 text-[10px] text-zinc-600">
+                              {action.authorUsername || 'system'} · {new Date(action.createdAt).toLocaleString()}
+                              {action.expiresAt ? ` · expires ${new Date(action.expiresAt).toLocaleString()}` : ''}
+                              {action.revokedAt ? ` · revoked ${new Date(action.revokedAt).toLocaleString()}` : ''}
+                              {action.type === 'warn' ? action.acknowledgedAt ? ` - acknowledged ${new Date(action.acknowledgedAt).toLocaleString()}` : ' - awaiting acknowledgment' : ''}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="space-y-2">
+                        {profile.sessions.length === 0 ? <EmptyText>No sessions recorded.</EmptyText> : profile.sessions.map(session => (
+                          <div key={session.id} className="rounded border border-zinc-800 bg-black/20 px-3 py-3">
+                            <div className="flex items-center justify-between gap-3">
+                              <span className="text-sm font-medium text-white">Slot #{session.sourceId || 'offline'}</span>
+                              <span className="rounded border border-zinc-800 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-zinc-400">
+                                {formatSessionDuration(session.joinedAt, session.leftAt)}
+                              </span>
+                            </div>
+                            <div className="mt-2 text-xs text-zinc-400">
+                              Joined {new Date(session.joinedAt).toLocaleString()}
+                              {session.leftAt ? ` · Left ${new Date(session.leftAt).toLocaleString()}` : ' · Still connected'}
+                            </div>
+                            {session.leftAt && (
+                              <div className="mt-1 text-[10px] text-zinc-600">
+                                Playtime {formatDistanceStrict(new Date(session.joinedAt), new Date(session.leftAt))}
+                              </div>
+                            )}
+                            {session.dropReason ? <div className="mt-1 text-[10px] text-zinc-600">Reason: {session.dropReason}</div> : null}
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </Section>
                 </div>
 

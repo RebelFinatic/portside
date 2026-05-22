@@ -8,6 +8,7 @@ import {
   FileCode2,
   Settings,
   ShieldCheck,
+  ShieldX,
   FileText,
   BadgeCheck,
   PackageOpen,
@@ -20,8 +21,9 @@ import { cn } from '../lib/utils';
 import { useAuthStore } from '../store/useAuthStore';
 
 const navigation = [
-  { name: 'Live Terminal', to: '/console', icon: TerminalSquare, permission: 'console.view' },
+  { name: 'Console', to: '/console', icon: TerminalSquare, permission: 'console.view' },
   { name: 'Players', to: '/players', icon: Users },
+  { name: 'Ban Manager', to: '/bans', icon: ShieldX, permission: 'players.ban' },
   { name: 'Script Manager', to: '/resources', icon: FileCode2, permission: 'commands.resources' },
   { name: 'Role Management', to: '/roles', icon: ShieldCheck, permission: 'manage.admins' },
   { name: 'Whitelist', to: '/whitelist', icon: BadgeCheck, permission: 'players.whitelist' },
@@ -84,7 +86,7 @@ export function SidebarContent({ collapsed, showLabels, onToggle, onNavigate }: 
 
       <nav className={cn('flex-1 space-y-1 overflow-y-auto', collapsed ? 'px-3' : 'px-4')}>
         {showLabels ? (
-          <div className="text-[10px] uppercase tracking-widest text-zinc-500 font-semibold mb-2 ml-2">Core Control</div>
+          <div className="text-[10px] uppercase tracking-widest text-zinc-500 font-semibold mb-2 ml-2">Server</div>
         ) : (
           <div className="mx-2 mb-2 border-t border-zinc-800/80" aria-hidden="true" />
         )}
@@ -112,7 +114,7 @@ export function SidebarContent({ collapsed, showLabels, onToggle, onNavigate }: 
         ))}
 
         {showLabels ? (
-          <div className="pt-6 text-[10px] uppercase tracking-widest text-zinc-500 font-semibold mb-2 ml-2">Infrastructure</div>
+          <div className="pt-6 text-[10px] uppercase tracking-widest text-zinc-500 font-semibold mb-2 ml-2">System</div>
         ) : (
           <div className="mx-2 my-3 border-t border-zinc-800/80" aria-hidden="true" />
         )}

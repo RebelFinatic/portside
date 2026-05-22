@@ -12,6 +12,7 @@ import {
   assertSafeResourceName,
   createRconRunner,
   fetchFiveMJson,
+  parseResmonOutput,
   readServerConfig,
   writeServerConfig,
 } from './fivem';
@@ -1358,6 +1359,7 @@ export const registerApiRoutes = (
       name,
       type: 'daily',
       timeOfDay,
+      daysOfWeek: Array.isArray(req.body?.daysOfWeek) ? req.body.daysOfWeek : undefined,
       warningMinutes: normalizeWarnings(req.body?.warningMinutes),
       message: typeof req.body?.message === 'string' ? req.body.message.trim() : null,
       enabled: req.body?.enabled !== false,
@@ -1378,6 +1380,7 @@ export const registerApiRoutes = (
       name,
       enabled: req.body?.enabled !== undefined ? Boolean(req.body.enabled) : existing.enabled,
       timeOfDay,
+      daysOfWeek: Array.isArray(req.body?.daysOfWeek) ? req.body.daysOfWeek : existing.daysOfWeek,
       executeAt: existing.type === 'temporary' && typeof req.body?.executeAt === 'string' ? new Date(req.body.executeAt).toISOString() : existing.executeAt,
       warningMinutes: normalizeWarnings(req.body?.warningMinutes || existing.warningMinutes),
       message: typeof req.body?.message === 'string' ? req.body.message.trim() : existing.message,
@@ -1799,6 +1802,15 @@ export const registerApiRoutes = (
     res.json(action);
   });
 
+  app.get('/api/moderation/bans', authenticateToken, requirePermission(store, 'players.ban'), (req, res) => {
+    const status = typeof req.query.status === 'string' ? req.query.status : 'all';
+    const normalizedStatus = status === 'active' || status === 'expired' || status === 'revoked' ? status : 'all';
+    const query = typeof req.query.query === 'string' ? req.query.query : '';
+    const limit = Number(req.query.limit || 50);
+    const offset = Number(req.query.offset || 0);
+    res.json(store.listBanActions({ status: normalizedStatus, query, limit, offset }));
+  });
+
   app.get('/api/moderation/ban-templates', authenticateToken, requirePermission(store, 'players.ban'), (_req, res) => {
     res.json(store.listBanTemplates());
   });
@@ -1945,6 +1957,19 @@ export const registerApiRoutes = (
     } catch (err: any) {
       logger.add('ERROR', `Could not fetch FiveM resources: ${err.message}`, 'system', 'server');
       res.status(502).json({ error: 'Failed to fetch FiveM resources' });
+    }
+  });
+
+  app.get('/api/resources/performance', authenticateToken, requirePermission(store, 'commands.resources'), async (_req, res) => {
+    try {
+      const output = await runRconCommand('resmon 1');
+      res.json({
+        stats: parseResmonOutput(output),
+        capturedAt: new Date().toISOString(),
+      });
+    } catch (err: any) {
+      logger.add('WARN', `Resource performance query failed: ${err.message}`, 'resources', 'server');
+      res.status(502).json({ error: err.message || 'Failed to fetch resource performance data' });
     }
   });
 

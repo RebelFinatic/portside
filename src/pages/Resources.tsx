@@ -73,6 +73,9 @@ export default function Resources() {
   const [searchQuery, setSearchQuery] = useState('');
   const [pendingAction, setPendingAction] = useState<PendingAction | null>(null);
   const [monitorStatus, setMonitorStatus] = useState<MonitorStatus | null>(null);
+  const [showPerformance, setShowPerformance] = useState(false);
+  const [perfStats, setPerfStats] = useState<Record<string, { cpuMs: number; timePercent: number | null }>>({});
+  const [perfLoading, setPerfLoading] = useState(false);
   const token = useAuthStore(state => state.token);
 
   useEffect(() => {
@@ -117,11 +120,38 @@ export default function Resources() {
       apiFetch('/monitor/status')
         .then(setMonitorStatus)
         .catch(() => setMonitorStatus(null));
+      if (showPerformance) {
+        await fetchPerformance({ silent: true });
+      }
     } catch {
       toast.error('Failed to load resources');
     } finally {
       setLoading(false);
       setRefreshing(false);
+    }
+  };
+
+  const fetchPerformance = async ({ silent = false } = {}) => {
+    setPerfLoading(true);
+    try {
+      const data = await apiFetch('/resources/performance');
+      const nextStats: Record<string, { cpuMs: number; timePercent: number | null }> = {};
+      (Array.isArray(data.stats) ? data.stats : []).forEach((stat: { name: string; cpuMs: number; timePercent: number | null }) => {
+        nextStats[stat.name] = { cpuMs: stat.cpuMs, timePercent: stat.timePercent };
+      });
+      setPerfStats(nextStats);
+    } catch (error: any) {
+      if (!silent) toast.error(error.message || 'Failed to load resource performance');
+    } finally {
+      setPerfLoading(false);
+    }
+  };
+
+  const togglePerformance = async () => {
+    const next = !showPerformance;
+    setShowPerformance(next);
+    if (next) {
+      await fetchPerformance();
     }
   };
 
@@ -203,6 +233,18 @@ export default function Resources() {
               {refreshing ? <Loader2 className="h-4 w-4 animate-spin text-orange-500" /> : <RefreshCw className="h-4 w-4 text-zinc-400" />}
               Rescan
             </button>
+            <button
+              onClick={togglePerformance}
+              disabled={perfLoading}
+              className={`flex-1 sm:flex-none flex items-center justify-center gap-2 px-3 py-2 border rounded-lg text-sm font-medium transition-colors disabled:opacity-60 ${
+                showPerformance
+                  ? 'border-orange-600/40 bg-orange-600/10 text-orange-300'
+                  : 'border-zinc-800 bg-zinc-900 text-white hover:border-zinc-700'
+              }`}
+            >
+              {perfLoading ? <Loader2 className="h-4 w-4 animate-spin text-orange-500" /> : <Layers className="h-4 w-4" />}
+              Performance
+            </button>
             <button className="flex-1 sm:flex-none flex items-center justify-center gap-2 px-3 py-2 bg-orange-600/10 border border-orange-600/20 rounded-lg text-sm font-semibold text-orange-500 hover:bg-orange-600/20 transition-colors">
               <Upload className="h-4 w-4" /> Upload
             </button>
@@ -271,6 +313,15 @@ export default function Resources() {
                       <div className="min-w-0">
                         <div className="flex items-center gap-2">
                           <h3 className="truncate text-sm font-semibold text-white">{resource.name}</h3>
+                          {showPerformance && perfStats[resource.name] && (
+                            <span className={`rounded border px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider ${
+                              perfStats[resource.name].cpuMs >= 5
+                                ? 'border-yellow-500/30 bg-yellow-500/10 text-yellow-300'
+                                : 'border-zinc-700 bg-zinc-900 text-zinc-400'
+                            }`}>
+                              {perfStats[resource.name].cpuMs.toFixed(2)}ms
+                            </span>
+                          )}
                           <PanelRightOpen className={`h-3.5 w-3.5 ${isSelected ? 'text-orange-400' : 'text-zinc-600 group-hover:text-zinc-400'}`} />
                         </div>
                         <p className="mt-1 text-xs text-zinc-500 line-clamp-1">

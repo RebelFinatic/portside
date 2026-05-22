@@ -6,9 +6,9 @@ type RelayMonitorEvent = (eventName: string, payload: Record<string, unknown>) =
 
 const pad = (value: number) => String(value).padStart(2, '0');
 
-const occurrenceForToday = (timeOfDay: string, nowDate = new Date()) => {
+const occurrenceForDay = (timeOfDay: string, date: Date) => {
   const [hours, minutes] = timeOfDay.split(':').map(Number);
-  const occurrence = new Date(nowDate);
+  const occurrence = new Date(date);
   occurrence.setHours(hours || 0, minutes || 0, 0, 0);
   return occurrence;
 };
@@ -19,11 +19,20 @@ export const nextOccurrenceForSchedule = (schedule: RestartScheduleRecord, nowDa
   }
 
   if (!schedule.timeOfDay) return null;
-  const today = occurrenceForToday(schedule.timeOfDay, nowDate);
-  if (today.getTime() >= nowDate.getTime() - 60_000) return today;
-  const tomorrow = new Date(today);
-  tomorrow.setDate(tomorrow.getDate() + 1);
-  return tomorrow;
+
+  const allowedDays = schedule.daysOfWeek?.length ? schedule.daysOfWeek : [0, 1, 2, 3, 4, 5, 6];
+
+  for (let offset = 0; offset < 8; offset += 1) {
+    const candidateDate = new Date(nowDate);
+    candidateDate.setDate(candidateDate.getDate() + offset);
+    if (!allowedDays.includes(candidateDate.getDay())) continue;
+
+    const occurrence = occurrenceForDay(schedule.timeOfDay, candidateDate);
+    if (offset === 0 && occurrence.getTime() < nowDate.getTime() - 60_000) continue;
+    return occurrence;
+  }
+
+  return null;
 };
 
 export const defaultRestartName = () => {

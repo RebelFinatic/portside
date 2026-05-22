@@ -109,3 +109,31 @@ export const writeServerConfig = async (content: string) => {
   await writeFile(configPath, content, 'utf8');
   return configPath;
 };
+
+export interface ResourcePerformanceStat {
+  name: string;
+  cpuMs: number;
+  timePercent: number | null;
+  memoryKb: number | null;
+}
+
+export const parseResmonOutput = (output: string): ResourcePerformanceStat[] => {
+  const stats: ResourcePerformanceStat[] = [];
+
+  for (const rawLine of output.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || /^resource/i.test(line) || /^=+$/.test(line) || /^monitoring/i.test(line)) continue;
+
+    const match = line.match(/^([\w.-]+)\s+([\d.]+)\s*ms(?:\s+([\d.]+)\s*%)?(?:\s+([\d.]+)\s*ms)?(?:\s+([\d.]+))?/i);
+    if (!match) continue;
+
+    stats.push({
+      name: match[1],
+      cpuMs: Number(match[2]) || 0,
+      timePercent: match[3] ? Number(match[3]) : null,
+      memoryKb: match[5] ? Number(match[5]) : null,
+    });
+  }
+
+  return stats;
+};

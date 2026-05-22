@@ -20,6 +20,10 @@ local function compatCommandsEnabled()
   return GetConvar('portside_monitor_compat_txadmin_commands', 'false') == 'true'
 end
 
+local function txAdminCompatEnabled()
+  return GetConvar('portside_txadmin_compat', 'true') == 'true'
+end
+
 local function canUseCommand(source)
   if source == 0 then
     return true
@@ -340,7 +344,9 @@ local function relayTxAdminEvent(source, args)
 
   table.remove(args, 1)
   local payload = decodePayload(table.concat(args, ' '))
-  TriggerEvent('txAdmin:events:' .. eventName, payload)
+  if txAdminCompatEnabled() then
+    TriggerEvent('txAdmin:events:' .. eventName, payload)
+  end
   reportEvent('txAdmin:events:' .. eventName, payload)
 
   if eventName == 'announcement' and payload.message then

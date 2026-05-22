@@ -447,14 +447,15 @@ export default function Console() {
           <div className="flex items-center gap-4">
             <div className="flex items-center gap-2">
               <Bookmark className="h-3.5 w-3.5 text-zinc-500" />
-              <select 
-                className="bg-black/40 border border-zinc-800 rounded px-2 py-1 text-[11px] font-mono text-zinc-300 focus:outline-none focus:border-blue-500 appearance-none cursor-pointer max-w-[120px]"
+              <select
+                style={{ colorScheme: 'dark' }}
+                className="rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-[11px] font-mono text-zinc-200 focus:outline-none focus:border-orange-500 appearance-none cursor-pointer max-w-[120px]"
                 onChange={loadPreset}
                 value=""
               >
-                <option value="" disabled>Load Preset...</option>
+                <option value="" disabled className="bg-zinc-900 text-zinc-300">Load Preset...</option>
                 {presets.map(p => (
-                  <option key={p.name} value={p.name}>{p.name}</option>
+                  <option key={p.name} value={p.name} className="bg-zinc-900 text-zinc-300">{p.name}</option>
                 ))}
               </select>
             </div>
@@ -465,25 +466,27 @@ export default function Console() {
               <span className="text-[10px] font-bold uppercase tracking-widest text-zinc-500 flex items-center gap-1">
                 <Filter className="h-3 w-3" /> Level:
               </span>
-              <select 
-                className="bg-black/40 border border-zinc-800 rounded px-2 py-1 text-[11px] font-mono text-zinc-300 focus:outline-none focus:border-orange-500 appearance-none cursor-pointer"
+              <select
+                style={{ colorScheme: 'dark' }}
+                className="rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-[11px] font-mono text-zinc-200 focus:outline-none focus:border-orange-500 appearance-none cursor-pointer"
                 value={levelFilter}
                 onChange={(e) => setLevelFilter(e.target.value)}
               >
                 {uniqueLevels.map(level => (
-                  <option key={level} value={level}>{level as string}</option>
+                  <option key={level} value={level} className="bg-zinc-900 text-zinc-300">{level as string}</option>
                 ))}
               </select>
             </div>
             <div className="flex items-center gap-2">
               <span className="text-[10px] font-bold uppercase tracking-widest text-zinc-500">Source:</span>
-              <select 
-                className="bg-black/40 border border-zinc-800 rounded px-2 py-1 text-[11px] font-mono text-zinc-300 focus:outline-none focus:border-orange-500 appearance-none cursor-pointer"
+              <select
+                style={{ colorScheme: 'dark' }}
+                className="rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-[11px] font-mono text-zinc-200 focus:outline-none focus:border-orange-500 appearance-none cursor-pointer"
                 value={sourceFilter}
                 onChange={(e) => setSourceFilter(e.target.value)}
               >
                 {uniqueSources.map(source => (
-                   <option key={source} value={source}>{source as string}</option>
+                  <option key={source} value={source} className="bg-zinc-900 text-zinc-300">{source as string}</option>
                 ))}
               </select>
             </div>

@@ -13,6 +13,12 @@ const normalizeWarningMinutes = (minutes: unknown = [30, 15, 10, 5, 4, 3, 2, 1])
     .sort((a, b) => b - a);
 };
 
+const normalizeDaysOfWeek = (days: unknown = [0, 1, 2, 3, 4, 5, 6]) => {
+  const values = Array.isArray(days) ? days : [0, 1, 2, 3, 4, 5, 6];
+  const normalized = [...new Set(values.map(Number).filter(day => Number.isInteger(day) && day >= 0 && day <= 6))].sort((a, b) => a - b);
+  return normalized.length > 0 ? normalized : [0, 1, 2, 3, 4, 5, 6];
+};
+
 const secretKeyPattern = /(password|secret|token|license|connection|string|key)/i;
 
 const redactRecord = (input: Record<string, unknown>) => Object.fromEntries(
@@ -124,6 +130,7 @@ export interface RestartScheduleRecord {
   type: 'daily' | 'temporary';
   timeOfDay: string | null;
   executeAt: string | null;
+  daysOfWeek: number[];
   warningMinutes: number[];
   message: string | null;
   createdAt: string;
@@ -752,6 +759,12 @@ export class PortsideStore {
     }
     if (!onboardingColumns.some(column => column.name === 'attached_target_path')) {
       this.db.prepare('ALTER TABLE onboarding_state ADD COLUMN attached_target_path TEXT').run();
+    }
+
+    const restartColumns = this.db.prepare('PRAGMA table_info(restart_schedules)').all() as { name: string }[];
+    if (!restartColumns.some(column => column.name === 'days_of_week')) {
+      this.db.prepare('ALTER TABLE restart_schedules ADD COLUMN days_of_week TEXT').run();
+      this.db.prepare('UPDATE restart_schedules SET days_of_week = ? WHERE days_of_week IS NULL').run(JSON.stringify([0, 1, 2, 3, 4, 5, 6]));
     }
 
     this.migrateAppSettings();
@@ -2012,6 +2025,10 @@ export class PortsideStore {
   }
 
   private mapRestartSchedule(row: any): RestartScheduleRecord {
+    const parsedDays = this.parseJsonArray(row.days_of_week)
+      .filter((value: unknown): value is number => Number.isInteger(Number(value)))
+      .map(Number)
+      .filter(day => day >= 0 && day <= 6);
     return {
       id: row.id,
       name: row.name,
@@ -2019,6 +2036,7 @@ export class PortsideStore {
       type: row.type === 'temporary' ? 'temporary' : 'daily',
       timeOfDay: row.time_of_day,
       executeAt: row.execute_at,
+      daysOfWeek: parsedDays.length > 0 ? parsedDays : [0, 1, 2, 3, 4, 5, 6],
       warningMinutes: this.parseJsonArray(row.warning_minutes).filter((value: unknown): value is number => Number.isFinite(Number(value))).map(Number),
       message: row.message,
       createdAt: row.created_at,
@@ -2028,7 +2046,7 @@ export class PortsideStore {
 
   listRestartSchedules(): RestartScheduleRecord[] {
     const rows = this.db.prepare(`
-      SELECT id, name, enabled, type, time_of_day, execute_at, warning_minutes, message, created_at, updated_at
+      SELECT id, name, enabled, type, time_of_day, execute_at, days_of_week, warning_minutes, message, created_at, updated_at
       FROM restart_schedules
       ORDER BY enabled DESC, type ASC, COALESCE(execute_at, time_of_day) ASC
     `).all() as any[];
@@ -2037,7 +2055,7 @@ export class PortsideStore {
 
   getRestartSchedule(id: string): RestartScheduleRecord | null {
     const row = this.db.prepare(`
-      SELECT id, name, enabled, type, time_of_day, execute_at, warning_minutes, message, created_at, updated_at
+      SELECT id, name, enabled, type, time_of_day, execute_at, days_of_week, warning_minutes, message, created_at, updated_at
       FROM restart_schedules
       WHERE id = ?
     `).get(id) as any;
@@ -2049,6 +2067,7 @@ export class PortsideStore {
     type: 'daily' | 'temporary';
     timeOfDay?: string | null;
     executeAt?: string | null;
+    daysOfWeek?: number[];
     warningMinutes?: number[];
     message?: string | null;
     enabled?: boolean;
@@ -2056,9 +2075,10 @@ export class PortsideStore {
     const id = crypto.randomUUID();
     const timestamp = now();
     const warnings = normalizeWarningMinutes(input.warningMinutes);
+    const daysOfWeek = normalizeDaysOfWeek(input.daysOfWeek);
     this.db.prepare(`
-      INSERT INTO restart_schedules (id, name, enabled, type, time_of_day, execute_at, warning_minutes, message, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO restart_schedules (id, name, enabled, type, time_of_day, execute_at, days_of_week, warning_minutes, message, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id,
       input.name,
@@ -2066,6 +2086,7 @@ export class PortsideStore {
       input.type,
       input.timeOfDay || null,
       input.executeAt || null,
+      JSON.stringify(daysOfWeek),
       JSON.stringify(warnings),
       input.message || null,
       timestamp,
@@ -2079,6 +2100,7 @@ export class PortsideStore {
     enabled: boolean;
     timeOfDay?: string | null;
     executeAt?: string | null;
+    daysOfWeek?: number[];
     warningMinutes?: number[];
     message?: string | null;
   }) {
@@ -2086,13 +2108,14 @@ export class PortsideStore {
     if (!existing) return null;
     this.db.prepare(`
       UPDATE restart_schedules
-      SET name = ?, enabled = ?, time_of_day = ?, execute_at = ?, warning_minutes = ?, message = ?, updated_at = ?
+      SET name = ?, enabled = ?, time_of_day = ?, execute_at = ?, days_of_week = ?, warning_minutes = ?, message = ?, updated_at = ?
       WHERE id = ?
     `).run(
       input.name,
       input.enabled ? 1 : 0,
       input.timeOfDay || null,
       input.executeAt || null,
+      JSON.stringify(normalizeDaysOfWeek(input.daysOfWeek ?? existing.daysOfWeek)),
       JSON.stringify(normalizeWarningMinutes(input.warningMinutes)),
       input.message || null,
       now(),
@@ -2638,6 +2661,60 @@ export class PortsideStore {
       WHERE player_id = ?
       ORDER BY created_at DESC
     `).all(playerId).map(row => this.mapAction(row));
+  }
+
+  listBanActions(input?: {
+    status?: 'active' | 'expired' | 'revoked' | 'all';
+    query?: string;
+    limit?: number;
+    offset?: number;
+  }) {
+    const limit = Math.min(Math.max(input?.limit ?? 50, 1), 200);
+    const offset = Math.max(input?.offset ?? 0, 0);
+    const status = input?.status || 'all';
+    const query = (input?.query || '').trim().toLowerCase();
+    const timestamp = now();
+
+    const statusClause = status === 'active'
+      ? 'AND ma.revoked_at IS NULL AND (ma.expires_at IS NULL OR ma.expires_at > ?)'
+      : status === 'expired'
+        ? 'AND ma.revoked_at IS NULL AND ma.expires_at IS NOT NULL AND ma.expires_at <= ?'
+        : status === 'revoked'
+          ? 'AND ma.revoked_at IS NOT NULL'
+          : '';
+
+    const statusParams = status === 'active' || status === 'expired' ? [timestamp] : [];
+
+    const rows = this.db.prepare(`
+      SELECT ma.*, p.display_name as playerDisplayName
+      FROM moderation_actions ma
+      LEFT JOIN players p ON p.id = ma.player_id
+      WHERE ma.type = 'ban'
+      ${statusClause}
+      ORDER BY ma.created_at DESC
+      LIMIT ?
+      OFFSET ?
+    `).all(...statusParams, limit + (query ? 500 : 0), offset) as any[];
+
+    const mapped = rows.map(row => ({
+      ...this.mapAction(row),
+      playerDisplayName: row.playerDisplayName || row.target_name || 'Unknown player',
+    }));
+
+    if (!query) {
+      return mapped.slice(0, limit);
+    }
+
+    return mapped.filter(ban => {
+      const haystack = [
+        ban.playerDisplayName,
+        ban.targetName,
+        ban.reason,
+        ban.authorUsername,
+        ...ban.targetIdentifiers,
+      ].filter(Boolean).join(' ').toLowerCase();
+      return haystack.includes(query);
+    }).slice(0, limit);
   }
 
   getActiveBanForPlayer(playerId: string) {
