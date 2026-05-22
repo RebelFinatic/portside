@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { Select, SelectOption } from '../components/Select';
 import { apiFetch } from '../lib/api';
 import { ShieldCheck, Plus, Trash2, Edit, Save, X, User, AlertTriangle, Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
@@ -342,17 +343,17 @@ export default function Roles() {
               minLength={10}
               required
             />
-            <select
+            <Select
               value={newAdmin.roleId}
               onChange={(event) => setNewAdmin(prev => ({ ...prev, roleId: event.target.value }))}
-              className="bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-zinc-700"
+              className="text-xs"
               required
             >
-              <option value="">Select role</option>
+              <SelectOption value="">Select role</SelectOption>
               {roles.filter(role => !role.isOwner).map(role => (
-                <option key={role.id} value={role.id}>{role.name}</option>
+                <SelectOption key={role.id} value={role.id}>{role.name}</SelectOption>
               ))}
-            </select>
+            </Select>
             <button
               type="submit"
               disabled={adminLoading}
@@ -376,17 +377,17 @@ export default function Roles() {
                   <tr key={user.id} className="hover:bg-zinc-900/30 transition-colors">
                     <td className="p-4 text-sm font-medium text-white">{user.username}</td>
                     <td className="p-4">
-                      <select 
+                      <Select
                         value={user.roleId}
                         onChange={(e) => handleAssignRole(user.id, e.target.value)}
                         disabled={user.isOwner}
-                        className="bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-zinc-700 w-full max-w-[200px]"
+                        className="max-w-[200px] py-1.5 text-xs"
                       >
-                        <option value="" disabled>Select Role</option>
+                        <SelectOption value="" disabled>Select Role</SelectOption>
                         {roles.map(r => (
-                          <option key={r.id} value={r.id}>{r.name}</option>
+                          <SelectOption key={r.id} value={r.id}>{r.name}</SelectOption>
                         ))}
-                      </select>
+                      </Select>
                     </td>
                     <td className="p-4">
                       <div className="flex gap-2">

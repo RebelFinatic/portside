@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useLayoutEffect, useRef, useMemo } from 'react';
 import { ArrowDown, Terminal, Copy, Command, Filter, Save, Bookmark } from 'lucide-react';
+import { Select, SelectOption } from '../components/Select';
 import { apiFetch } from '../lib/api';
 import { useAuthStore } from '../store/useAuthStore';
 import { toast } from 'sonner';
@@ -447,17 +448,17 @@ export default function Console() {
           <div className="flex items-center gap-4">
             <div className="flex items-center gap-2">
               <Bookmark className="h-3.5 w-3.5 text-zinc-500" />
-              <select
-                style={{ colorScheme: 'dark' }}
-                className="rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-[11px] font-mono text-zinc-200 focus:outline-none focus:border-orange-500 appearance-none cursor-pointer max-w-[120px]"
+              <Select
+                variant="compact"
+                className="max-w-[120px]"
                 onChange={loadPreset}
                 value=""
               >
-                <option value="" disabled className="bg-zinc-900 text-zinc-300">Load Preset...</option>
+                <SelectOption value="" disabled>Load Preset...</SelectOption>
                 {presets.map(p => (
-                  <option key={p.name} value={p.name} className="bg-zinc-900 text-zinc-300">{p.name}</option>
+                  <SelectOption key={p.name} value={p.name}>{p.name}</SelectOption>
                 ))}
-              </select>
+              </Select>
             </div>
             
             <div className="w-px h-4 bg-zinc-800 mx-1"></div>
@@ -466,29 +467,29 @@ export default function Console() {
               <span className="text-[10px] font-bold uppercase tracking-widest text-zinc-500 flex items-center gap-1">
                 <Filter className="h-3 w-3" /> Level:
               </span>
-              <select
-                style={{ colorScheme: 'dark' }}
-                className="rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-[11px] font-mono text-zinc-200 focus:outline-none focus:border-orange-500 appearance-none cursor-pointer"
+              <Select
+                variant="compact"
+                className="w-auto"
                 value={levelFilter}
                 onChange={(e) => setLevelFilter(e.target.value)}
               >
                 {uniqueLevels.map(level => (
-                  <option key={level} value={level} className="bg-zinc-900 text-zinc-300">{level as string}</option>
+                  <SelectOption key={level} value={level}>{level as string}</SelectOption>
                 ))}
-              </select>
+              </Select>
             </div>
             <div className="flex items-center gap-2">
               <span className="text-[10px] font-bold uppercase tracking-widest text-zinc-500">Source:</span>
-              <select
-                style={{ colorScheme: 'dark' }}
-                className="rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-[11px] font-mono text-zinc-200 focus:outline-none focus:border-orange-500 appearance-none cursor-pointer"
+              <Select
+                variant="compact"
+                className="w-auto"
                 value={sourceFilter}
                 onChange={(e) => setSourceFilter(e.target.value)}
               >
                 {uniqueSources.map(source => (
-                  <option key={source} value={source} className="bg-zinc-900 text-zinc-300">{source as string}</option>
+                  <SelectOption key={source} value={source}>{source as string}</SelectOption>
                 ))}
-              </select>
+              </Select>
             </div>
             
             <button 

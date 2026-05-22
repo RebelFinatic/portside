@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Ban, ChevronLeft, ChevronRight, FileText, History, Loader2, MessageSquareWarning, MoreHorizontal, Plus, RefreshCw, Search, Send, ShieldAlert, StickyNote, Users, X, Zap } from 'lucide-react';
 import { formatDistanceStrict, intervalToDuration } from 'date-fns';
 import { useSearchParams } from 'react-router-dom';
+import { Select, SelectOption } from '../components/Select';
 import { apiFetch, hasPermission } from '../lib/api';
 import { toast } from 'sonner';
 import ConfirmModal from '../components/ConfirmModal';
@@ -654,9 +655,9 @@ export default function Players() {
                   <Section ref={profileActionsRef} title="Actions" icon={<Ban className="h-4 w-4" />}>
                     <div className="space-y-3">
                       <input value={reason} onChange={event => setReason(event.target.value)} placeholder="Reason" className="w-full rounded-lg border border-zinc-800 bg-black/40 px-3 py-2 text-sm text-white placeholder-zinc-600 focus:outline-none focus:border-orange-500" />
-                      <select value={duration} onChange={event => setDuration(event.target.value)} className="w-full rounded-lg border border-zinc-800 bg-black/40 px-3 py-2 text-sm text-white focus:outline-none focus:border-orange-500">
-                        {defaultDurations.map(item => <option key={item} value={item}>{item}</option>)}
-                      </select>
+                      <Select value={duration} onChange={event => setDuration(event.target.value)}>
+                        {defaultDurations.map(item => <SelectOption key={item} value={item}>{item}</SelectOption>)}
+                      </Select>
                       <div className="grid grid-cols-2 gap-2">
                         {hasPermission('players.ban') && <ActionButton onClick={() => createBan(profile, reason, duration)} loading={actionLoading === 'ban'} disabled={profileBanned} label={profileBanned ? 'Banned' : 'Ban'} icon={<Ban className="h-4 w-4" />} />}
                         {hasPermission('players.warn') && profileOnline && <ActionButton onClick={createWarning} loading={actionLoading === 'warn'} label="Warn" icon={<MessageSquareWarning className="h-4 w-4" />} />}
@@ -740,13 +741,12 @@ export default function Players() {
             placeholder="Ban reason (required)"
             className="w-full rounded-lg border border-zinc-800 bg-black/40 px-3 py-2 text-sm text-white placeholder-zinc-600 focus:outline-none focus:border-red-500"
           />
-          <select
+          <Select
             value={rowBanDuration}
             onChange={event => setRowBanDuration(event.target.value)}
-            className="w-full rounded-lg border border-zinc-800 bg-black/40 px-3 py-2 text-sm text-white focus:outline-none focus:border-red-500"
           >
-            {defaultDurations.map(item => <option key={item} value={item}>{item}</option>)}
-          </select>
+            {defaultDurations.map(item => <SelectOption key={item} value={item}>{item}</SelectOption>)}
+          </Select>
         </div>
       </ConfirmModal>
 
